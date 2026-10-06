@@ -34,6 +34,18 @@ const settings = reactive<EditSettings>({ exposure: 0, contrast: 0, highlights: 
 const imageInput = ref<HTMLInputElement | null>(null);
 const collageInput = ref<HTMLInputElement | null>(null);
 const previewCanvas = ref<HTMLCanvasElement | null>(null);
+type WorkflowStep = 1 | 2 | 3 | 4;
+const activeWorkflowStep = ref<WorkflowStep>(1);
+const previewColumnElement = ref<HTMLElement | null>(null);
+const uploadZoneElement = ref<HTMLElement | null>(null);
+const previewToolbarElement = ref<HTMLElement | null>(null);
+const controlsPanelElement = ref<HTMLElement | null>(null);
+const paperControlsElement = ref<HTMLElement | null>(null);
+const cropControlsElement = ref<HTMLElement | null>(null);
+const editingHintElement = ref<HTMLElement | null>(null);
+const exportActionsElement = ref<HTMLElement | null>(null);
+const viewportWidth = ref(1280);
+const viewportHeight = ref(900);
 const collagePhotos = shallowRef<CollagePhoto[]>([]);
 const selectedCollagePhotoId = ref("");
 const selectedCollagePhoto = computed(() => collagePhotos.value.find((photo) => photo.id === selectedCollagePhotoId.value) || null);
@@ -102,6 +114,13 @@ const adjustingPreviewMaxEdge = 720;
 const isAdjustingPreview = ref(false);
 const outputWidth = computed(() => Math.round(pageWidthMm.value / 25.4 * outputDpi));
 const outputHeight = computed(() => Math.round(pageHeightMm.value / 25.4 * outputDpi));
+const previewCanvasMaxHeight = computed(() => Math.max(230, Math.min(500, viewportHeight.value - (viewportWidth.value <= 1000 ? 300 : 430))));
+const previewCanvasMaxWidth = computed(() => Math.min(410, previewCanvasMaxHeight.value * pageWidthMm.value / pageHeightMm.value));
+const previewCanvasStyle = computed(() => ({
+  aspectRatio: aspectRatio.value,
+  width: `min(${viewportWidth.value <= 1000 ? "90%" : "74%"}, ${previewCanvasMaxWidth.value}px)`,
+  maxHeight: `${previewCanvasMaxHeight.value}px`
+}));
 
 const presetSettings: Record<string, Omit<EditSettings, "preset">> = {
   "原片": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0, subjectExposure: 0, subjectContrast: 0 },
@@ -128,6 +147,7 @@ let adjustmentEndTimer: ReturnType<typeof setTimeout> | undefined;
 let collageAdjustmentEndTimer: ReturnType<typeof setTimeout> | undefined;
 
 onMounted(async () => {
+  syncPreviewViewport();
   await studio.refresh();
   const queryWorkId = String(route.query.work || "");
   const work = studio.works.value.find((item) => item.id === queryWorkId);
@@ -158,11 +178,16 @@ onMounted(async () => {
   }
   window.addEventListener("paste", handlePaste);
   window.addEventListener("resize", queuePreviewRender);
+  window.addEventListener("resize", syncPreviewViewport);
 });
 watch([imageData, templateId, settings, designOptions, photoMetadata, collagePhotos, selectedCollagePhotoId], queuePreviewRender, { deep: true, flush: "post" });
+watch(imageData, (value) => {
+  if (value) activeWorkflowStep.value = 2;
+});
 onBeforeUnmount(() => {
   window.removeEventListener("paste", handlePaste);
   window.removeEventListener("resize", queuePreviewRender);
+  window.removeEventListener("resize", syncPreviewViewport);
   if (adjustmentEndTimer) clearTimeout(adjustmentEndTimer);
   if (collageAdjustmentEndTimer) clearTimeout(collageAdjustmentEndTimer);
   if (previewFrame) cancelAnimationFrame(previewFrame);
@@ -1340,6 +1365,34 @@ function formatSetting(key: string) {
   return sign + value;
 }
 
+function scrollWithinPanel(panel: HTMLElement | null, target: HTMLElement | null) {
+  if (!panel || !target) return;
+  if (window.matchMedia("(max-width: 1000px)").matches) {
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  const panelTop = panel.getBoundingClientRect().top;
+  const targetTop = target.getBoundingClientRect().top;
+  panel.scrollTo({ top: Math.max(0, panel.scrollTop + targetTop - panelTop - 12), behavior: "smooth" });
+}
+
+function syncPreviewViewport() {
+  viewportWidth.value = window.innerWidth;
+  viewportHeight.value = window.innerHeight;
+}
+
+function goToWorkflowStep(step: WorkflowStep) {
+  activeWorkflowStep.value = step;
+  const destinations: Record<WorkflowStep, { panel: HTMLElement | null; target: HTMLElement | null }> = {
+    1: { panel: previewColumnElement.value, target: imageData.value ? previewToolbarElement.value : uploadZoneElement.value },
+    2: { panel: controlsPanelElement.value, target: imageData.value ? cropControlsElement.value : editingHintElement.value },
+    3: { panel: controlsPanelElement.value, target: paperControlsElement.value },
+    4: { panel: previewColumnElement.value, target: exportActionsElement.value }
+  };
+  const destination = destinations[step];
+  scrollWithinPanel(destination.panel, destination.target);
+}
+
 async function addToAssets() {
   if (!imageData.value) return;
   try {
@@ -1357,11 +1410,17 @@ async function addToAssets() {
     <div><div class="eyebrow">MAKE / PHOTO PRINT</div><h1 class="page-title">照片与相纸</h1><p class="page-subtitle">导入、调整、选尺寸，再导出或保存为作品。原图保持不变。</p></div>
     <div class="heading-actions"><button class="button" :disabled="!imageData" @click="addToAssets">收进素材</button><button class="button primary" :disabled="!imageData || busy" @click="saveToWorks">{{ busy ? "保存中…" : "保存作品" }}</button></div>
   </div>
-  <div class="workflow"><span class="current"><b>1</b> 导入</span><i></i><span :class="{ current: imageData }"><b>2</b> 调整</span><i></i><span :class="{ current: imageData }"><b>3</b> 选尺寸</span><i></i><span :class="{ current: imageData }"><b>4</b> 导出 / 保存</span><span class="workflow-skip">流程可跳过，随时返回</span></div>
+  <nav class="workflow" aria-label="制作流程跳转">
+    <button type="button" class="workflow-step" :class="{ current: activeWorkflowStep === 1 }" :aria-current="activeWorkflowStep === 1 ? 'step' : undefined" @click="goToWorkflowStep(1)"><b>1</b> 导入</button><i></i>
+    <button type="button" class="workflow-step" :class="{ current: activeWorkflowStep === 2 }" :aria-current="activeWorkflowStep === 2 ? 'step' : undefined" @click="goToWorkflowStep(2)"><b>2</b> 调整</button><i></i>
+    <button type="button" class="workflow-step" :class="{ current: activeWorkflowStep === 3 }" :aria-current="activeWorkflowStep === 3 ? 'step' : undefined" @click="goToWorkflowStep(3)"><b>3</b> 选尺寸</button><i></i>
+    <button type="button" class="workflow-step" :class="{ current: activeWorkflowStep === 4 }" :aria-current="activeWorkflowStep === 4 ? 'step' : undefined" @click="goToWorkflowStep(4)"><b>4</b> 导出 / 保存</button>
+    <span class="workflow-skip">可点击跳转，不必按顺序</span>
+  </nav>
   <input ref="collageInput" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden @change="onCollageChoose">
   <div class="editor-layout">
-    <section class="preview-column">
-      <div v-if="!imageData" class="upload-zone card" @click="imageInput?.click()" @dragover.prevent @drop.prevent="onDrop">
+    <section ref="previewColumnElement" class="preview-column" :class="{ 'has-image': Boolean(imageData) }">
+      <div v-if="!imageData" ref="uploadZoneElement" class="upload-zone card" @click="imageInput?.click()" @dragover.prevent @drop.prevent="onDrop">
         <input ref="imageInput" type="file" accept="image/*" hidden @change="onChoose">
         <div class="upload-mark">↑</div><h2>把照片放进来</h2><p>点击选择，或把图片拖到这里</p>
         <button class="button primary" @click.stop="imageInput?.click()">选择照片</button>
@@ -1370,7 +1429,7 @@ async function addToAssets() {
         <small>JPEG、PNG、WebP · 单张最大 30 MB；拼贴最多 15 张 / 合计 120 MB</small>
       </div>
       <div v-else class="preview-wrap">
-        <div class="preview-toolbar">
+        <div ref="previewToolbarElement" class="preview-toolbar">
           <span><b>画布预览</b><small>{{ selectedTemplate.name }} · {{ designOptions.pageOrientation === "landscape" ? "横版" : "竖版" }} · {{ paperColorLabel }}</small></span>
           <div class="preview-actions">
             <button v-if="!isCollage" class="button small" :disabled="selectingSubject" title="当前模型自动识别人物主体，不支持任意物体" @click="selectSubject">{{ selectingSubject ? "识别中…" : subjectMask ? "重新识别主体" : "选取主体" }}</button>
@@ -1382,13 +1441,13 @@ async function addToAssets() {
           </div>
         </div>
         <div class="canvas-stage">
-          <div class="print-canvas" :style="{ aspectRatio }">
+          <div class="print-canvas" :style="previewCanvasStyle">
             <canvas ref="previewCanvas" class="photo-preview-canvas" :class="{ 'collage-selectable': isCollage }" role="img" :aria-label="isCollage ? '照片拼贴预览，点击单张照片进行选择' : '照片预览'" @click="selectCollagePhoto"></canvas>
           </div>
         </div>
         <div class="preview-foot"><span>{{ isCollage ? `${collagePhotos.length} 张照片 · ${designOptions.collageLayout === 'grid' ? '规整网格' : '错落拼贴'} · 保留比例` : "原图完整保留比例，画布内自动留白" }}</span><span>{{ cameraInfo || fileName }}</span></div>
       </div>
-      <div class="export-row">
+      <div id="export-actions" ref="exportActionsElement" class="export-row">
         <button class="button primary" :disabled="!imageData" @click="exportPng">导出 PNG · 300 DPI</button>
         <button class="button" :disabled="!imageData" @click="exportPdf">导出打印 PDF</button>
         <span>PDF 暂为 RGB，普通打印可用；印厂 CMYK/PDF-X 未开发</span>
@@ -1396,8 +1455,9 @@ async function addToAssets() {
       <div class="export-spec">当前纸张输出：{{ outputWidth }} × {{ outputHeight }} px · 300 px/in；PNG 会写入分辨率标记</div>
       <div v-if="notice" class="notice" role="status">{{ notice }}</div>
     </section>
-    <aside class="controls card">
-      <div class="control-section"><div class="control-title"><h2>画面设置</h2><button class="text-button" @click="resetSettings">重置</button></div>
+    <aside ref="controlsPanelElement" class="controls card">
+      <div ref="paperControlsElement" class="control-section">
+        <div class="control-title"><h2>画面设置</h2><button class="text-button" @click="resetSettings">重置</button></div>
         <label class="field-label">作品名称<input v-model="title" type="text" maxlength="80" placeholder="给这件作品起个名字"></label>
         <label class="field-label">纸张尺寸<select v-model="templateId"><option v-for="item in printTemplates" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
         <label class="field-label">纸张方向<select :value="designOptions.pageOrientation" @change="onPageOrientationChange"><option value="portrait">竖版</option><option value="landscape">横版</option></select></label>
@@ -1418,7 +1478,9 @@ async function addToAssets() {
         </template>
         <p v-else class="adjustment-note">当前为多照片拼贴；请在下方选择规整网格或错落拼贴并设置列数、间距。</p>
       </div>
-      <div v-if="isCollage" class="control-section">
+      <div v-if="!imageData" ref="editingHintElement" class="control-empty-hint"><b>照片导入后再开始调整</b><p>先选纸张也可以。导入照片后，这里会出现裁切、主体微调、边框和水印等工具。</p></div>
+      <template v-if="imageData">
+      <div v-if="isCollage" ref="cropControlsElement" class="control-section">
         <div class="control-title"><h2>多照片拼贴</h2><span class="control-hint">{{ collagePhotos.length }} / 15 张</span></div>
         <label class="field-label">排版方式<select v-model="designOptions.collageLayout"><option value="grid">规整网格</option><option value="masonry">错落拼贴（列高自适应）</option></select></label>
         <label class="field-label">列数<select v-model.number="designOptions.collageColumns" @change="markCollageColumnsCustomized"><option v-for="columns in [1, 2, 3, 4, 5]" :key="columns" :value="columns">{{ columns }} 列</option></select></label>
@@ -1443,7 +1505,7 @@ async function addToAssets() {
         </div>
         <p class="adjustment-note">大尺寸打印清晰度取决于原图像素；放大裁切可能降低局部清晰度。</p>
       </div>
-      <div v-if="!isCollage" class="control-section">
+      <div v-if="!isCollage" ref="cropControlsElement" class="control-section">
         <div class="control-title"><h2>裁切与放大</h2><button class="text-button" :disabled="!imageData" @click="resetPhotoLayout">重置位置</button></div>
         <div class="fit-options"><button class="preset-chip" :class="{ selected: designOptions.fitMode === 'contain' }" :aria-pressed="designOptions.fitMode === 'contain'" :disabled="!imageData" @click="designOptions.fitMode = 'contain'">完整显示</button><button class="preset-chip" :class="{ selected: designOptions.fitMode === 'cover' }" :aria-pressed="designOptions.fitMode === 'cover'" :disabled="!imageData" @click="designOptions.fitMode = 'cover'">填满裁切</button></div>
         <div class="range-label"><div class="range-heading"><span>照片放大</span><b>{{ designOptions.zoomPercent }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.zoomPercent" type="range" min="100" max="300" step="1" aria-label="照片放大" :disabled="!imageData"><input v-model.number="designOptions.zoomPercent" class="value-input" type="number" min="100" max="300" step="1" aria-label="照片放大百分比" :disabled="!imageData"></div></div>
@@ -1451,6 +1513,28 @@ async function addToAssets() {
         <div class="range-label"><div class="range-heading"><span>上下位置</span><b>{{ designOptions.offsetY }}</b></div><div class="range-inputs"><input v-model.number="designOptions.offsetY" type="range" min="-100" max="100" step="1" aria-label="上下位置" :disabled="!imageData"><input v-model.number="designOptions.offsetY" class="value-input" type="number" min="-100" max="100" step="1" aria-label="上下位置数值" :disabled="!imageData"></div></div>
         <button class="button small rotate-button" :disabled="!imageData" @click="rotatePhoto">旋转 90°（当前 {{ designOptions.rotation }}°）</button>
         <p class="adjustment-note">“填满裁切”会让照片铺满纸张内框，超出部分不导出；可用位置滑杆调整保留区域。原图不改写。</p>
+      </div>
+      <div class="control-section">
+        <div class="control-title"><h2>手动调整</h2><div class="history-actions"><button class="text-button" :disabled="!canUndo" @click="undoSettings">↶ 撤销</button><button class="text-button" :disabled="!canRedo" @click="redoSettings">↷ 重做</button></div></div>
+        <div v-for="item in adjustmentControls" :key="item.key" class="range-label">
+          <div class="range-heading"><label :for="`adjustment-${item.key}`">{{ item.name }}</label><b>{{ formatSetting(item.key) }}</b></div>
+          <div class="range-inputs">
+            <input :id="`adjustment-${item.key}`" v-model.number="settings[item.key]" type="range" :min="item.min" :max="item.max" :step="item.step" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'">
+            <input type="number" class="value-input" :aria-label="item.name + '数值'" :min="item.min" :max="item.max" :step="item.step" :value="settings[item.key]" @focus="beginSliderHistory" @keydown="beginSliderHistory" @input="updateAdjustmentInput($event, item)" @change="endSliderHistory" @blur="finishAdjustmentInput($event, item)">
+          </div>
+        </div>
+        <p class="adjustment-note">曝光按 EV 调整；其他值是本工具的相对强度，不等同于 Lightroom 的标尺。冷暖与色调为视觉近似，并非 Kelvin 白平衡。</p>
+      </div>
+      <div v-if="subjectMask" class="control-section">
+        <div class="control-title"><h2>选区局部调整</h2><span class="control-hint">蓝色区域会受影响</span></div>
+        <div v-for="item in subjectAdjustmentControls" :key="item.key" class="range-label">
+          <div class="range-heading"><label :for="`adjustment-${item.key}`">{{ item.name }}</label><b>{{ formatSetting(item.key) }}</b></div>
+          <div class="range-inputs">
+            <input :id="`adjustment-${item.key}`" v-model.number="settings[item.key]" type="range" :min="item.min" :max="item.max" :step="item.step" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'">
+            <input type="number" class="value-input" :aria-label="item.name + '数值'" :min="item.min" :max="item.max" :step="item.step" :value="settings[item.key]" @focus="beginSliderHistory" @keydown="beginSliderHistory" @input="updateAdjustmentInput($event, item)" @change="endSliderHistory" @blur="finishAdjustmentInput($event, item)">
+          </div>
+        </div>
+        <p class="adjustment-note">当前模型实际识别的是人物，蓝色是识别概率较高的区域；反选后将影响人物以外区域。蒙版只是近似结果，头发、手指等边缘可能不准，导出不会带上蓝色。</p>
       </div>
       <div v-if="!isCollage" class="control-section">
         <div class="control-title"><h2>光影边框风格</h2><span class="control-hint">单张照片</span></div>
@@ -1495,35 +1579,20 @@ async function addToAssets() {
           <p class="adjustment-note">单张照片可选添加相机、镜头、焦距、光圈、快门、ISO 和拍摄时间；原图没有记录的参数不会补造。水印只绘入导出成品，不改写原图。</p>
         </template>
       </div>
-      <div class="control-section"><div class="control-title"><h2>快速色调</h2><span class="control-hint">应用后可继续微调</span></div>
-        <div class="preset-groups">
-          <div class="preset-group"><span class="preset-group-title">基础</span><div class="preset-grid"><button v-for="filter in basicFilters" :key="filter" class="preset-chip" :class="{ selected: settings.preset === filter }" @click="applyPreset(filter)">{{ filter }}</button></div></div>
-          <div class="preset-group"><span class="preset-group-title">氛围配方</span><div class="preset-grid"><button v-for="filter in moodFilters" :key="filter" class="preset-chip" :class="{ selected: settings.preset === filter }" @click="applyPreset(filter)">{{ filter }}</button></div></div>
-        </div>
-        <div v-if="settings.preset === '自定义'" class="preset-custom" role="status">自定义 · 参数已按下面滑杆显示</div>
-        <p class="adjustment-note">氛围配方由本工具的基础参数组合，不是相机厂商官方滤镜，也不含胶片颗粒、漏光或光晕纹理。</p>
-      </div>
-      <div class="control-section"><div class="control-title"><h2>手动调整</h2><div class="history-actions"><button class="text-button" :disabled="!canUndo" @click="undoSettings">↶ 撤销</button><button class="text-button" :disabled="!canRedo" @click="redoSettings">↷ 重做</button></div></div>
-        <div v-for="item in adjustmentControls" :key="item.key" class="range-label">
-          <div class="range-heading"><label :for="`adjustment-${item.key}`">{{ item.name }}</label><b>{{ formatSetting(item.key) }}</b></div>
-          <div class="range-inputs">
-            <input :id="`adjustment-${item.key}`" v-model.number="settings[item.key]" type="range" :min="item.min" :max="item.max" :step="item.step" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'">
-            <input type="number" class="value-input" :aria-label="item.name + '数值'" :min="item.min" :max="item.max" :step="item.step" :value="settings[item.key]" @focus="beginSliderHistory" @keydown="beginSliderHistory" @input="updateAdjustmentInput($event, item)" @change="endSliderHistory" @blur="finishAdjustmentInput($event, item)">
+      <div class="control-section">
+        <details class="experimental-presets">
+          <summary class="control-title"><span class="control-summary-title">快速色调（实验）</span><span class="control-hint">{{ settings.preset === "原片" ? "配方暂缓整理" : `当前：${settings.preset}` }}</span></summary>
+          <div class="experimental-presets-content">
+            <div class="preset-groups">
+              <div class="preset-group"><span class="preset-group-title">基础</span><div class="preset-grid"><button v-for="filter in basicFilters" :key="filter" class="preset-chip" :class="{ selected: settings.preset === filter }" @click="applyPreset(filter)">{{ filter }}</button></div></div>
+              <div class="preset-group"><span class="preset-group-title">氛围配方</span><div class="preset-grid"><button v-for="filter in moodFilters" :key="filter" class="preset-chip" :class="{ selected: settings.preset === filter }" @click="applyPreset(filter)">{{ filter }}</button></div></div>
+            </div>
+            <div v-if="settings.preset === '自定义'" class="preset-custom" role="status">自定义 · 参数已按下面滑杆显示</div>
+            <p class="adjustment-note">这些是本工具的探索配方，不是相机厂商官方滤镜；暂时保留现有项，不继续新增，后续再按可预览、可保存的方案整理。</p>
           </div>
-        </div>
-        <p class="adjustment-note">曝光按 EV 调整；其他值是本工具的相对强度，不等同于 Lightroom 的标尺。冷暖与色调为视觉近似，并非 Kelvin 白平衡。</p>
+        </details>
       </div>
-      <div v-if="subjectMask" class="control-section">
-        <div class="control-title"><h2>选区局部调整</h2><span class="control-hint">蓝色区域会受影响</span></div>
-        <div v-for="item in subjectAdjustmentControls" :key="item.key" class="range-label">
-          <div class="range-heading"><label :for="`adjustment-${item.key}`">{{ item.name }}</label><b>{{ formatSetting(item.key) }}</b></div>
-          <div class="range-inputs">
-            <input :id="`adjustment-${item.key}`" v-model.number="settings[item.key]" type="range" :min="item.min" :max="item.max" :step="item.step" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'">
-            <input type="number" class="value-input" :aria-label="item.name + '数值'" :min="item.min" :max="item.max" :step="item.step" :value="settings[item.key]" @focus="beginSliderHistory" @keydown="beginSliderHistory" @input="updateAdjustmentInput($event, item)" @change="endSliderHistory" @blur="finishAdjustmentInput($event, item)">
-          </div>
-        </div>
-        <p class="adjustment-note">当前模型实际识别的是人物，蓝色是识别概率较高的区域；反选后将影响人物以外区域。蒙版只是近似结果，头发、手指等边缘可能不准，导出不会带上蓝色。</p>
-      </div>
+      </template>
       <div class="privacy-note"><span>◉</span><p><b>你的照片留在本机</b><br>作品保存到当前浏览器，不会自动上传。请定期导出备份。</p></div>
     </aside>
   </div>
@@ -1532,11 +1601,11 @@ async function addToAssets() {
 
 <style scoped>
 .editor-page{display:flex;flex-direction:column;width:100%;height:100%;min-height:0;overflow:hidden}.editor-heading{display:flex;justify-content:space-between;align-items:end;gap:20px;flex:0 0 auto}.heading-actions{display:flex;gap:8px}
-.workflow{display:flex;align-items:center;gap:9px;padding:17px 0 20px;color:#b0b1aa;font-size:10px;flex:0 0 auto}.workflow span{white-space:nowrap}.workflow b{display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid #dedfd8;border-radius:50%;font-size:9px;margin-right:5px;font-weight:500}.workflow .current{color:#4e5148}.workflow .current b{background:#30312c;color:white;border-color:#30312c}.workflow i{height:1px;background:#e5e6df;width:34px}.workflow-skip{margin-left:auto;color:#9c9e95}
-.editor-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:stretch;flex:1;min-height:0;overflow:hidden}.preview-column{min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain}.upload-zone{min-height:490px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-style:dashed;background:#fbfbf9;cursor:pointer}.upload-mark{display:grid;place-items:center;width:54px;height:54px;border-radius:18px;background:#efefe9;font-size:24px;color:#686a60}.upload-zone h2{font-size:17px;margin:18px 0 6px}.upload-zone p{font-size:11px;color:#92948b;margin:0 0 18px}.paste-hint{margin-top:14px;color:#7f8178;font-size:10px}.upload-zone small{margin-top:20px;color:#b0b1aa;font-size:9px}.collage-upload-button{margin-top:8px}
-.preview-wrap{background:#f0f0eb;border:1px solid #e6e6df;border-radius:11px;overflow:hidden}.preview-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;background:#fff}.preview-toolbar span{display:grid;gap:4px}.preview-toolbar b{font-size:11px}.preview-toolbar small{font-size:9px;color:#9a9b93}.preview-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.canvas-stage{min-height:430px;display:grid;place-items:center;padding:35px;background:#eeeee9}.print-canvas{width:min(74%,410px);max-height:500px;background:white;box-shadow:none;display:flex;align-items:center;justify-content:center;overflow:hidden}.photo-preview-canvas{display:block;width:100%;height:100%;object-fit:contain}.photo-preview-canvas.collage-selectable{cursor:crosshair}.preview-foot{background:#fff;padding:10px 13px;display:flex;justify-content:space-between;gap:8px;font-size:9px;color:#96978f}
-.export-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.export-row>span{font-size:9px;color:#96978e;margin-left:auto}.export-spec{margin-top:7px;color:#72746c;font-size:9px}.notice{margin-top:10px;background:#edf1e9;border:1px solid #e1e8db;padding:10px 12px;border-radius:7px;color:#5f7059;font-size:10px}
-.controls{position:static;align-self:stretch;height:100%;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:0 16px;scrollbar-width:thin;scrollbar-color:#d6d7cf transparent}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}
+.workflow{display:flex;align-items:center;gap:9px;padding:17px 0 20px;color:#b0b1aa;font-size:10px;flex:0 0 auto}.workflow-step{display:inline-flex;align-items:center;flex:none;white-space:nowrap;border:0;padding:0;background:transparent;color:inherit;font:inherit;cursor:pointer}.workflow-step:hover{color:#30312c}.workflow-step:focus-visible{outline:2px solid #a8aa9e;outline-offset:4px;border-radius:3px}.workflow b{display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid #dedfd8;border-radius:50%;font-size:9px;margin-right:5px;font-weight:500}.workflow-step.current{color:#4e5148}.workflow-step.current b{background:#30312c;color:white;border-color:#30312c}.workflow i{height:1px;background:#e5e6df;width:34px;flex:none}.workflow-skip{margin-left:auto;color:#9c9e95;white-space:nowrap}
+.editor-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:stretch;flex:1;min-height:0;overflow:hidden}.preview-column{min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain}.upload-zone{min-height:clamp(360px,55vh,490px);display:flex;flex-direction:column;align-items:center;justify-content:center;border-style:dashed;background:#fbfbf9;cursor:pointer}.upload-mark{display:grid;place-items:center;width:54px;height:54px;border-radius:18px;background:#efefe9;font-size:24px;color:#686a60}.upload-zone h2{font-size:17px;margin:18px 0 6px}.upload-zone p{font-size:11px;color:#92948b;margin:0 0 18px}.paste-hint{margin-top:14px;color:#7f8178;font-size:10px}.upload-zone small{margin-top:20px;color:#b0b1aa;font-size:9px}.collage-upload-button{margin-top:8px}
+.preview-wrap{background:#f0f0eb;border:1px solid #e6e6df;border-radius:11px;overflow:hidden}.preview-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;background:#fff}.preview-toolbar span{display:grid;gap:4px}.preview-toolbar b{font-size:11px}.preview-toolbar small{font-size:9px;color:#9a9b93}.preview-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.canvas-stage{min-height:clamp(300px,40vh,430px);display:grid;place-items:center;padding:35px;background:#eeeee9}.print-canvas{width:min(74%,410px);background:white;box-shadow:none;display:flex;align-items:center;justify-content:center;overflow:hidden}.photo-preview-canvas{display:block;width:100%;height:100%;object-fit:contain}.photo-preview-canvas.collage-selectable{cursor:crosshair}.preview-foot{background:#fff;padding:10px 13px;display:flex;justify-content:space-between;gap:8px;font-size:9px;color:#96978f}
+.export-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.preview-column.has-image .export-row{position:sticky;bottom:0;z-index:3;margin-top:0;padding:9px 0 8px;border-top:1px solid #e8e9e2;background:rgba(250,250,248,.97);backdrop-filter:blur(8px)}.export-row .button:disabled{opacity:.42;cursor:not-allowed;filter:saturate(.4)}.export-row>span{font-size:9px;color:#96978e;margin-left:auto}.export-spec{margin-top:7px;color:#72746c;font-size:9px}.notice{margin-top:10px;background:#edf1e9;border:1px solid #e1e8db;padding:10px 12px;border-radius:7px;color:#5f7059;font-size:10px}
+.controls{position:static;align-self:stretch;height:100%;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:0 16px;scrollbar-width:thin;scrollbar-color:#d6d7cf transparent}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}.control-empty-hint{margin:14px 0;padding:13px;border:1px solid #e8e9e2;border-radius:7px;background:#fafaf8;color:#56594e;font-size:10px}.control-empty-hint p{margin:6px 0 0;color:#85877e;font-size:9px;line-height:1.6}.experimental-presets>summary{list-style:none;cursor:pointer;gap:8px}.experimental-presets>summary::-webkit-details-marker{display:none}.experimental-presets>summary::after{content:"展开";margin-left:4px;color:#797b72;font-size:9px;font-weight:400}.experimental-presets[open]>summary{margin-bottom:14px}.experimental-presets[open]>summary::after{content:"收起"}.control-summary-title{color:#30312c;font-size:12px;font-weight:600}.experimental-presets-content{padding-bottom:2px}
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
 .field-label.color-field input[type=color]{width:100%;height:32px;padding:3px;cursor:pointer}.fit-options{display:grid;grid-template-columns:1fr 1fr;gap:6px}.fit-options .preset-chip{height:34px}.rotate-button{margin-top:13px}.toggle-field{display:flex;align-items:center;gap:8px;color:#6f7168;font-size:10px}.toggle-field input{accent-color:#56594e}
 .layout-recommendation{display:flex;justify-content:space-between;align-items:center;margin-top:9px;padding:9px 10px;border:1px solid #e8e8e2;border-radius:6px;background:#fafaf8;color:#777970;font-size:9px}.layout-recommendation .text-button{color:#56594e;font-weight:600}
@@ -1546,7 +1615,7 @@ async function addToAssets() {
 .preset-groups{display:grid;gap:12px}.preset-group{display:grid;gap:6px}.preset-group-title{font-size:9px;color:#96978e}
 .adjustment-note{margin:10px 0 0;color:#96978e;font-size:9px;line-height:1.6}.preset-custom{margin-top:8px;color:#56594e;font-size:9px}
 .privacy-note{display:flex;gap:9px;padding:14px 0;color:#7c7e75}.privacy-note>span{color:#87977f;font-size:14px}.privacy-note p{margin:0;font-size:9px;line-height:1.7}.privacy-note b{font-size:9px;color:#5b5d55}
-@media(max-width:1000px){.editor-page{height:auto;min-height:0;overflow:visible}.editor-layout{grid-template-columns:1fr;display:grid;flex:none;min-height:0;overflow:visible;align-items:start}.preview-column{min-height:0;overflow:visible}.controls{position:static;height:auto;min-height:0;max-height:none;overflow:visible;display:grid;grid-template-columns:1fr 1fr;column-gap:20px}.privacy-note{grid-column:1/-1}}
-@media(max-width:620px){.editor-heading{align-items:start;flex-direction:column}.workflow{gap:5px;overflow-x:auto}.workflow i{width:12px;flex-shrink:0}.workflow-skip{display:none}.canvas-stage{min-height:340px;padding:20px}.print-canvas{width:min(90%,400px)}.preview-foot{gap:8px;flex-direction:column}.export-row>span{width:100%;margin:0}.controls{display:block}}
+@media(max-width:1000px){.editor-page{height:auto;min-height:0;overflow:visible}.editor-layout{grid-template-columns:1fr;display:grid;flex:none;min-height:0;overflow:visible;align-items:start}.preview-column{min-height:0;overflow:visible}.preview-column.has-image .export-row{position:static;backdrop-filter:none}.controls{position:static;height:auto;min-height:0;max-height:none;overflow:visible;display:grid;grid-template-columns:1fr 1fr;column-gap:20px}.privacy-note{grid-column:1/-1}}
+@media(max-width:620px){.editor-heading{align-items:start;flex-direction:column}.workflow{gap:5px;overflow-x:auto}.workflow i{width:12px;flex-shrink:0}.workflow-skip{display:none}.canvas-stage{min-height:340px;padding:20px}.preview-foot{gap:8px;flex-direction:column}.export-row>span{width:100%;margin:0}.controls{display:block}}
 @media(max-width:720px){.preview-toolbar{align-items:flex-start;flex-direction:column}.preview-actions{width:100%;flex-wrap:wrap}}
 </style>
