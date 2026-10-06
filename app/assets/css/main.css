@@ -27,12 +27,15 @@ a { color: inherit; text-decoration: none; }
 .sidebar-bottom { margin-top: auto; display: flex; align-items: center; gap: 8px; border-top: 1px solid #efefe9; padding: 17px 9px 3px; font-size: 11px; color: #83857c; }
 .local-dot { width: 7px; height: 7px; border-radius: 100%; background: #79a984; }
 .main-area { margin-left: 244px; min-height: 100vh; }
+.main-area.editor-main { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 .topbar { height: 65px; padding: 0 42px; background: rgba(255,255,255,.78); border-bottom: 1px solid #eaeae5; display: flex; align-items: center; justify-content: space-between; }
+.editor-main .topbar { flex: 0 0 65px; }
 .breadcrumbs { color: #9a9b94; font-size: 12px; }
 .breadcrumbs span { padding: 0 9px; color: #c6c7c0; }
 .breadcrumbs b { color: #484a43; font-weight: 500; }
 .topbar-tag { font-size: 10px; color: #888a81; background: #f2f2ee; padding: 6px 10px; border-radius: 20px; }
 .page-container { max-width: 1440px; margin: 0 auto; padding: 35px 42px 64px; }
+.editor-main .page-container { width: 100%; flex: 1; min-height: 0; overflow: hidden; display: flex; padding: 18px 42px; }
 .eyebrow { color: #84867d; font-size: 10px; letter-spacing: .15em; text-transform: uppercase; }
 .page-title { margin: 8px 0 8px; font-size: clamp(26px, 3vw, 36px); line-height: 1.2; letter-spacing: -.04em; font-weight: 600; }
 .page-subtitle { color: #85877f; font-size: 13px; line-height: 1.7; margin: 0; }
@@ -59,4 +62,8 @@ a { color: inherit; text-decoration: none; }
   .main-area { margin-left: 68px; }
   .topbar { padding: 0 20px; }
   .page-container { padding: 27px 20px 50px; }
+}
+@media (max-width: 1000px) {
+  .main-area.editor-main { height: auto; min-height: 100vh; overflow: visible; display: block; }
+  .editor-main .page-container { display: block; height: auto; overflow: visible; padding: 27px 20px 50px; }
 }

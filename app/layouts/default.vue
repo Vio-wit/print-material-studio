@@ -33,7 +33,7 @@ const links = [
         <span>仅保存在这台设备</span>
       </div>
     </aside>
-    <main class="main-area">
+    <main class="main-area" :class="{ 'editor-main': route.path === '/editor' }">
       <header class="topbar">
         <div class="breadcrumbs">创作空间 <span>/</span> <b>{{ links.find((item) => item.to === route.path)?.label || "工作台" }}</b></div>
         <span class="topbar-tag">本地版 · 早期体验</span>
