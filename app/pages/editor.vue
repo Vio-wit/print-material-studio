@@ -21,6 +21,7 @@ const settings = reactive<EditSettings>({ exposure: 0, contrast: 0, highlights: 
 const imageInput = ref<HTMLInputElement | null>(null);
 const previewCanvas = ref<HTMLCanvasElement | null>(null);
 const subjectMask = shallowRef<SubjectMask | null>(null);
+const selectionInverted = ref(false);
 const selectingSubject = ref(false);
 const undoStack = ref<EditSettings[]>([]);
 const redoStack = ref<EditSettings[]>([]);
@@ -61,7 +62,10 @@ onMounted(async () => {
     title.value = work.title;
     templateId.value = work.templateId;
     Object.assign(settings, migrateLegacySettings(work.settings));
-    if (work.subjectSelection === "person") void selectPerson();
+    if (work.subjectSelection === "person" || work.subjectSelection === "inverse-person") {
+      selectionInverted.value = work.subjectSelection === "inverse-person";
+      void selectSubject();
+    }
   }
   window.addEventListener("paste", handlePaste);
   window.addEventListener("resize", queuePreviewRender);
@@ -89,7 +93,7 @@ async function renderPreview() {
 
   try {
     const image = await loadPhotoImage(source);
-    if (revision === previewRevision) drawPhoto(canvas, image, previewMaxEdge, subjectMask.value);
+    if (revision === previewRevision) drawPhoto(canvas, image, previewMaxEdge, subjectMask.value, selectionInverted.value);
   } catch {
     notice.value = "照片预览处理失败；可以重新导入这张照片再试。";
   }
@@ -105,7 +109,7 @@ async function loadPhotoImage(source: string) {
   return image;
 }
 
-function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: number, mask: SubjectMask | null) {
+function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: number, mask: SubjectMask | null, invertMask = false) {
   const scale = Math.min(1, maxEdge / Math.max(outputWidth.value, outputHeight.value));
   canvas.width = Math.max(1, Math.round(outputWidth.value * scale));
   canvas.height = Math.max(1, Math.round(outputHeight.value * scale));
@@ -125,12 +129,12 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   const y = Math.round((canvas.height - height) / 2);
   context.drawImage(image, x, y, width, height);
   const pixels = context.getImageData(x, y, width, height);
-  applyPhotoAdjustments(pixels.data, width, height, settings, mask);
+  applyPhotoAdjustments(pixels.data, width, height, settings, mask, invertMask);
   context.putImageData(pixels, x, y);
-  if (mask) drawSelectionOverlay(context, mask, x, y, width, height);
+  if (mask) drawSelectionOverlay(context, mask, x, y, width, height, invertMask);
 }
 
-function drawSelectionOverlay(context: CanvasRenderingContext2D, mask: SubjectMask, x: number, y: number, width: number, height: number) {
+function drawSelectionOverlay(context: CanvasRenderingContext2D, mask: SubjectMask, x: number, y: number, width: number, height: number, inverted: boolean) {
   const overlay = document.createElement("canvas");
   overlay.width = mask.width;
   overlay.height = mask.height;
@@ -142,7 +146,8 @@ function drawSelectionOverlay(context: CanvasRenderingContext2D, mask: SubjectMa
     pixels.data[offset] = 55;
     pixels.data[offset + 1] = 126;
     pixels.data[offset + 2] = 245;
-    pixels.data[offset + 3] = Math.round(Math.min(1, Math.max(0, mask.data[index]!)) * 90);
+    const confidence = Math.min(1, Math.max(0, mask.data[index]!));
+    pixels.data[offset + 3] = Math.round((inverted ? 1 - confidence : confidence) * 90);
   }
   overlayContext.putImageData(pixels, 0, 0);
   context.drawImage(overlay, x, y, width, height);
@@ -161,6 +166,7 @@ function setImage(file: File) {
   reader.onload = () => {
     imageData.value = String(reader.result || "");
     subjectMask.value = null;
+    selectionInverted.value = false;
     settings.subjectExposure = 0;
     settings.subjectContrast = 0;
     fileName.value = file.name;
@@ -233,11 +239,11 @@ function migrateLegacySettings(saved: Partial<EditSettings> & { brightness?: num
   };
 }
 
-async function selectPerson() {
+async function selectSubject() {
   if (!imageData.value || selectingSubject.value) return;
   const source = imageData.value;
   selectingSubject.value = true;
-  notice.value = "正在本机识别人像；首次使用会加载分割运行库，请稍候。";
+  notice.value = "正在本机识别人物主体；首次使用会加载模型，请稍候。";
   try {
     const image = await loadPhotoImage(source);
     const mask = await segmentPerson(image);
@@ -248,14 +254,15 @@ async function selectPerson() {
     }
     if (foregroundPixels / mask.data.length < 0.003) {
       subjectMask.value = null;
+      selectionInverted.value = false;
       settings.subjectExposure = 0;
       settings.subjectContrast = 0;
-      notice.value = "没有检测到明显人物。此功能主要识别近景人物，不适合风景或远处小人物。";
+      notice.value = "没有检测到明显人物。当前主体识别仅针对人物，不支持任意物体；远处小人物也可能漏选。";
       queuePreviewRender();
       return;
     }
     subjectMask.value = mask;
-    notice.value = "人物选区已生成；蓝色只用于预览提示，导出不会带上。边缘可有误差，多人时可能一起选中。";
+    notice.value = "人物主体选区已生成；蓝色只用于预览，导出不会带上。边缘可能有误差，多人时可能一起选中。";
     queuePreviewRender();
   } catch (error) {
     notice.value = "人物识别失败：" + (error instanceof Error ? error.message : "请稍后重试。");
@@ -266,10 +273,20 @@ async function selectPerson() {
 
 function clearSubjectSelection() {
   subjectMask.value = null;
+  selectionInverted.value = false;
   settings.subjectExposure = 0;
   settings.subjectContrast = 0;
   queuePreviewRender();
-  notice.value = "已清除人物选区；全局调整仍保留。";
+  notice.value = "已清除主体选区；全局调整仍保留。";
+}
+
+function invertSubjectSelection() {
+  if (!subjectMask.value) return;
+  selectionInverted.value = !selectionInverted.value;
+  queuePreviewRender();
+  notice.value = selectionInverted.value
+    ? "已反选区域：蓝色显示人物以外的背景，局部调整会作用于背景。"
+    : "已恢复人物选区：蓝色显示人物，局部调整会作用于人物。";
 }
 
 function rememberSettings() {
@@ -341,7 +358,7 @@ async function createExportCanvas(): Promise<HTMLCanvasElement> {
   const y = Math.round((canvas.height - height) / 2);
   context.drawImage(image, x, y, width, height);
   const pixels = context.getImageData(x, y, width, height);
-  applyPhotoAdjustments(pixels.data, width, height, settings, subjectMask.value);
+  applyPhotoAdjustments(pixels.data, width, height, settings, subjectMask.value, selectionInverted.value);
   context.putImageData(pixels, x, y);
   return canvas;
 }
@@ -461,7 +478,7 @@ async function saveToWorks() {
       imageData: imageData.value,
       templateId: templateId.value,
       settings: { ...settings },
-      ...(subjectMask.value ? { subjectSelection: "person" as const } : {}),
+      ...(subjectMask.value ? { subjectSelection: selectionInverted.value ? "inverse-person" as const : "person" as const } : {}),
       updatedAt: new Date().toISOString()
     };
     await studio.saveWork(work);
@@ -517,7 +534,8 @@ async function addToAssets() {
         <div class="preview-toolbar">
           <span><b>画布预览</b><small>{{ selectedTemplate.name }} · 白色纸张</small></span>
           <div class="preview-actions">
-            <button class="button small" :disabled="selectingSubject" @click="selectPerson">{{ selectingSubject ? "识别中…" : subjectMask ? "重新选人物" : "选中人物" }}</button>
+            <button class="button small" :disabled="selectingSubject" title="当前模型自动识别人物主体，不支持任意物体" @click="selectSubject">{{ selectingSubject ? "识别中…" : subjectMask ? "重新识别主体" : "选取主体" }}</button>
+            <button v-if="subjectMask" class="text-button" :aria-pressed="selectionInverted" @click="invertSubjectSelection">{{ selectionInverted ? "恢复主体选区" : "反选区域" }}</button>
             <button v-if="subjectMask" class="text-button" @click="clearSubjectSelection">清除选区</button>
             <button class="button small" @click="imageInput?.click()">换一张</button>
             <input ref="imageInput" type="file" accept="image/*" hidden @change="onChoose">
@@ -564,10 +582,10 @@ async function addToAssets() {
         <p class="adjustment-note">曝光按 EV 调整；其他值是本工具的相对强度，不等同于 Lightroom 的标尺。冷暖与色调为视觉近似，并非 Kelvin 白平衡。</p>
       </div>
       <div v-if="subjectMask" class="control-section">
-        <div class="control-title"><h2>主体局部调整</h2><span class="control-hint">仅影响蓝色选区</span></div>
-        <label class="range-label"><span>主体曝光 <b>{{ formatSetting("subjectExposure") }}</b></span><input v-model.number="settings.subjectExposure" type="range" min="-3" max="3" step="0.1" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'"></label>
-        <label class="range-label"><span>主体对比度 <b>{{ formatSetting("subjectContrast") }}</b></span><input v-model.number="settings.subjectContrast" type="range" min="-50" max="50" step="1" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'"></label>
-        <p class="adjustment-note">蓝色蒙版只是预览辅助，导出不会出现蓝色。人物分割是近似结果，复杂边缘或多人照片建议后续补充手动修正。</p>
+        <div class="control-title"><h2>选区局部调整</h2><span class="control-hint">蓝色区域会受影响</span></div>
+        <label class="range-label"><span>选区曝光 <b>{{ formatSetting("subjectExposure") }}</b></span><input v-model.number="settings.subjectExposure" type="range" min="-3" max="3" step="0.1" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'"></label>
+        <label class="range-label"><span>选区对比度 <b>{{ formatSetting("subjectContrast") }}</b></span><input v-model.number="settings.subjectContrast" type="range" min="-50" max="50" step="1" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'"></label>
+        <p class="adjustment-note">当前模型实际识别的是人物，蓝色是识别概率较高的区域；反选后将影响人物以外区域。蒙版只是近似结果，头发、手指等边缘可能不准，导出不会带上蓝色。</p>
       </div>
       <div class="privacy-note"><span>◉</span><p><b>你的照片留在本机</b><br>作品保存到当前浏览器，不会自动上传。请定期导出备份。</p></div>
     </aside>

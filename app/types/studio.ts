@@ -25,7 +25,7 @@ export interface StudioWork {
   imageData: string;
   templateId: string;
   settings: EditSettings;
-  subjectSelection?: "person";
+  subjectSelection?: "person" | "inverse-person";
   updatedAt: string;
 }
 

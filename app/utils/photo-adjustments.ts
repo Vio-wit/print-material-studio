@@ -27,7 +27,8 @@ export function applyPhotoAdjustments(
   width: number,
   height: number,
   settings: PhotoAdjustmentValues,
-  subjectMask?: SubjectMask | null
+  subjectMask?: SubjectMask | null,
+  invertSubjectMask = false
 ) {
   const exposureGain = 2 ** settings.exposure;
   const contrast = 1 + settings.contrast / 100;
@@ -72,7 +73,8 @@ export function applyPhotoAdjustments(
     if (subjectMask && (settings.subjectExposure !== 0 || settings.subjectContrast !== 0)) {
       const maskX = Math.min(subjectMask.width - 1, Math.floor(x / width * subjectMask.width));
       const maskY = Math.min(subjectMask.height - 1, Math.floor(y / height * subjectMask.height));
-      const maskAmount = clamp(subjectMask.data[maskY * subjectMask.width + maskX] || 0);
+      const confidence = clamp(subjectMask.data[maskY * subjectMask.width + maskX] || 0);
+      const maskAmount = invertSubjectMask ? 1 - confidence : confidence;
       if (maskAmount > 0) {
         const subjectRed = ((red - 0.18) * subjectContrast + 0.18) * subjectExposureGain;
         const subjectGreen = ((green - 0.18) * subjectContrast + 0.18) * subjectExposureGain;
