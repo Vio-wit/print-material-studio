@@ -50,6 +50,8 @@ export interface CollagePhoto extends CollagePhotoOptions {
   photoMetadata?: PhotoMetadata;
 }
 
+export type PhotoLayoutPreset = "classic" | "polaroid" | "poster" | "postcard" | "album-cover";
+
 export interface PrintDesignOptions {
   fitMode: "contain" | "cover";
   zoomPercent: number;
@@ -61,6 +63,13 @@ export interface PrintDesignOptions {
   blurBackground: boolean;
   backgroundZoom: number;
   backgroundBlur: number;
+  layoutPreset: PhotoLayoutPreset;
+  layoutTitle: string;
+  layoutSubtitle: string;
+  layoutAuthor: string;
+  layoutTitleSizeMm: number;
+  layoutSubtitleSizeMm: number;
+  layoutAccentColor: string;
   lightFrameEnabled: boolean;
   lightFrameRadiusMm: number;
   lightFrameLogoText: string;

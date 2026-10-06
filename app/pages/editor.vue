@@ -5,7 +5,7 @@ import { useLocalStudio } from "../composables/useLocalStudio";
 import { applyPhotoAdjustments } from "../utils/photo-adjustments";
 import { computeCollageLayout, suggestCollageColumns } from "../utils/collage-layout";
 import { segmentPerson } from "../utils/person-segmentation";
-import type { CollageAdjustmentKey, CollagePhoto, CollagePhotoOptions, EditSettings, PhotoMetadata, PrintDesignOptions, StudioWork, SubjectMask } from "../types/studio";
+import type { CollageAdjustmentKey, CollagePhoto, CollagePhotoOptions, EditSettings, PhotoLayoutPreset, PhotoMetadata, PrintDesignOptions, StudioWork, SubjectMask } from "../types/studio";
 
 const route = useRoute();
 const studio = useLocalStudio();
@@ -17,6 +17,7 @@ const templateId = ref("photo-4x6");
 const defaultDesignOptions: PrintDesignOptions = {
   fitMode: "contain", zoomPercent: 100, offsetX: 0, offsetY: 0, rotation: 0,
   frameMm: 6, paperColor: "#ffffff", blurBackground: false, backgroundZoom: 125, backgroundBlur: 18,
+  layoutPreset: "classic", layoutTitle: "", layoutSubtitle: "", layoutAuthor: "", layoutTitleSizeMm: 7, layoutSubtitleSizeMm: 3.5, layoutAccentColor: "#c39b69",
   lightFrameEnabled: false, lightFrameRadiusMm: 1.5, lightFrameLogoText: "", lightFrameLogoSizeMm: 3.5,
   lightFrameMetadataSizeMm: 2, lightFrameLogoColor: "#ffffff", lightFrameBorderMm: 3, lightFrameBottomMm: 12,
   lightFrameShadowSizeMm: 5, lightFrameShadowDepth: 42, lightFrameShadowColor: "#808080", lightFrameShowMetadata: true,
@@ -73,6 +74,21 @@ const subjectAdjustmentControls: AdjustmentControl[] = [
 ];
 
 const selectedTemplate = computed(() => printTemplates.find((item) => item.id === templateId.value) || printTemplates[0]!);
+const photoLayoutPresets: Array<{ id: PhotoLayoutPreset; name: string; description: string }> = [
+  { id: "classic", name: "经典留白", description: "原比例居中，保留可调相纸边距。" },
+  { id: "polaroid", name: "拍立得白边", description: "上、左右留白，底部加标题区。" },
+  { id: "poster", name: "摄影海报", description: "主图配标题、副标题和作者信息。" },
+  { id: "postcard", name: "明信片正面", description: "照片与卡片文字区分层排布。" },
+  { id: "album-cover", name: "方形封面", description: "满版照片加封面标题层。" }
+];
+const templateRecommendedLayouts: Record<string, PhotoLayoutPreset> = {
+  "photo-4x6": "polaroid",
+  "photo-5x7": "polaroid",
+  a5: "poster",
+  "square-10": "album-cover",
+  postcard: "postcard"
+};
+const recommendedPhotoLayout = computed(() => photoLayoutPresets.find((preset) => preset.id === templateRecommendedLayouts[templateId.value]) || photoLayoutPresets[0]!);
 const pageWidthMm = computed(() => designOptions.pageOrientation === "landscape" ? Math.max(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm) : Math.min(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm));
 const pageHeightMm = computed(() => designOptions.pageOrientation === "landscape" ? Math.min(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm) : Math.max(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm));
 const aspectRatio = computed(() => pageWidthMm.value + " / " + pageHeightMm.value);
@@ -237,6 +253,41 @@ function drawRoundedPhotoShadow(context: CanvasRenderingContext2D, x: number, y:
   context.drawImage(shadowCanvas, x - padding, y - padding);
 }
 
+interface PhotoLayoutBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function getPhotoLayoutBox(canvasWidth: number, canvasHeight: number, dpi: number, lightFrameActive: boolean, photoAspect: number): PhotoLayoutBox {
+  const mmToPx = (mm: number) => mm / 25.4 * dpi;
+  const baseMargin = Math.max(0, designOptions.frameMm);
+  if (designOptions.layoutPreset === "album-cover") return { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
+
+  const marginMm = designOptions.layoutPreset === "classic"
+    ? (lightFrameActive ? designOptions.lightFrameBorderMm : baseMargin)
+    : Math.max(baseMargin, designOptions.layoutPreset === "poster" ? 7 : 4);
+  const margin = Math.round(mmToPx(marginMm));
+  const width = Math.max(1, canvasWidth - margin * 2);
+  let box: PhotoLayoutBox;
+  if (designOptions.layoutPreset === "polaroid") {
+    const bottomCaption = mmToPx(18);
+    box = { x: margin, y: margin, width, height: Math.max(1, canvasHeight - margin * 2 - bottomCaption) };
+  } else if (designOptions.layoutPreset === "poster" || designOptions.layoutPreset === "postcard") {
+    const captionHeight = mmToPx(designOptions.layoutPreset === "poster" ? 34 : 28);
+    box = { x: margin, y: margin, width, height: Math.max(1, canvasHeight - margin * 2 - captionHeight) };
+  } else {
+    box = { x: margin, y: margin, width, height: Math.max(1, canvasHeight - margin * 2) };
+  }
+  if (designOptions.layoutPreset !== "classic" && designOptions.fitMode === "contain" && Number.isFinite(photoAspect) && photoAspect > 0) {
+    const fittedWidth = Math.min(box.width, box.height * photoAspect);
+    const fittedHeight = fittedWidth / photoAspect;
+    return { ...box, x: box.x + (box.width - fittedWidth) / 2, width: fittedWidth, height: fittedHeight };
+  }
+  return box;
+}
+
 function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: number, mask: SubjectMask | null, invertMask = false, showSelectionOverlay = false) {
   const scale = Math.min(1, maxEdge / Math.max(outputWidth.value, outputHeight.value));
   canvas.width = Math.max(1, Math.round(outputWidth.value * scale));
@@ -247,15 +298,12 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   context.fillStyle = designOptions.paperColor;
   context.fillRect(0, 0, canvas.width, canvas.height);
   const dpi = canvas.width / (pageWidthMm.value / 25.4);
-  const frameSizeMm = designOptions.lightFrameEnabled ? designOptions.lightFrameBorderMm : designOptions.frameMm;
-  const inset = Math.round(frameSizeMm / 25.4 * dpi);
-  const maxWidth = Math.max(1, canvas.width - inset * 2);
-  const maxHeight = Math.max(1, canvas.height - inset * 2);
-  const areaX = inset;
-  const areaY = inset;
+  const lightFrameActive = designOptions.lightFrameEnabled && designOptions.layoutPreset === "classic";
   const rotated = designOptions.rotation % 180 !== 0;
   const fitWidth = rotated ? image.naturalHeight : image.naturalWidth;
   const fitHeight = rotated ? image.naturalWidth : image.naturalHeight;
+  const photoBox = getPhotoLayoutBox(canvas.width, canvas.height, dpi, lightFrameActive, fitWidth / fitHeight);
+  const { x: areaX, y: areaY, width: maxWidth, height: maxHeight } = photoBox;
   const fitScale = designOptions.fitMode === "cover"
     ? Math.max(maxWidth / fitWidth, maxHeight / fitHeight)
     : Math.min(maxWidth / fitWidth, maxHeight / fitHeight);
@@ -273,7 +321,7 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   applyPhotoAdjustments(pixels.data, photoWidth, photoHeight, settings, mask, invertMask);
   photoContext.putImageData(pixels, 0, 0);
 
-  if (designOptions.blurBackground || designOptions.lightFrameEnabled) {
+  if (designOptions.blurBackground || lightFrameActive) {
     const backgroundScale = Math.max(canvas.width / photoWidth, canvas.height / photoHeight) * designOptions.backgroundZoom / 100;
     const backgroundWidth = photoWidth * backgroundScale;
     const backgroundHeight = photoHeight * backgroundScale;
@@ -295,10 +343,10 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   const frameY = fullBleed ? areaY : centerY + offsetY - displayedHeight / 2;
   const frameWidth = fullBleed ? maxWidth : displayedWidth;
   const frameHeight = fullBleed ? maxHeight : displayedHeight;
-  const cornerRadius = designOptions.lightFrameEnabled
+  const cornerRadius = lightFrameActive
     ? Math.max(0, designOptions.lightFrameRadiusMm / 25.4 * dpi)
     : 0;
-  if (designOptions.lightFrameEnabled && designOptions.lightFrameShadowSizeMm > 0 && designOptions.lightFrameShadowDepth > 0) {
+  if (lightFrameActive && designOptions.lightFrameShadowSizeMm > 0 && designOptions.lightFrameShadowDepth > 0) {
     const shadowBlur = designOptions.lightFrameShadowSizeMm / 25.4 * dpi;
     drawRoundedPhotoShadow(
       context,
@@ -316,7 +364,7 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   context.beginPath();
   context.rect(areaX, areaY, maxWidth, maxHeight);
   context.clip();
-  if (designOptions.lightFrameEnabled) {
+  if (lightFrameActive) {
     traceRoundedRect(context, frameX, frameY, frameWidth, frameHeight, cornerRadius);
     context.clip();
   }
@@ -328,8 +376,88 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
     context.drawImage(overlay, -photoWidth / 2, -photoHeight / 2, photoWidth, photoHeight);
   }
   context.restore();
-  if (designOptions.lightFrameEnabled) drawLightFrameFooter(context, areaX, areaY, maxWidth, maxHeight, frameX, frameY, frameWidth, frameHeight, cornerRadius, dpi);
+  if (lightFrameActive) drawLightFrameFooter(context, areaX, areaY, maxWidth, maxHeight, frameX, frameY, frameWidth, frameHeight, cornerRadius, dpi);
+  else if (designOptions.layoutPreset !== "classic") drawPhotoLayoutDecorations(context, canvas, photoBox, dpi);
   if (designOptions.watermarkEnabled) drawWatermark(context, canvas);
+}
+
+function drawPhotoLayoutDecorations(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement, photoBox: PhotoLayoutBox, dpi: number) {
+  const mmToPx = (mm: number) => mm / 25.4 * dpi;
+  const titleText = designOptions.layoutTitle.trim() || title.value.trim() || fileName.value.replace(/\.[^.]+$/, "");
+  const subtitleText = designOptions.layoutSubtitle.trim();
+  const authorText = designOptions.layoutAuthor.trim();
+  const titleSize = Math.max(1, mmToPx(designOptions.layoutTitleSizeMm));
+  const subtitleSize = Math.max(1, mmToPx(designOptions.layoutSubtitleSizeMm));
+  const margin = mmToPx(Math.max(4, designOptions.frameMm));
+  const captionTop = photoBox.y + photoBox.height;
+  const captionHeight = Math.max(0, canvas.height - captionTop);
+  const titleFont = `600 ${titleSize}px Arial, "Microsoft YaHei", sans-serif`;
+  const subtitleFont = `400 ${subtitleSize}px Arial, "Microsoft YaHei", sans-serif`;
+
+  context.save();
+  context.textBaseline = "alphabetic";
+  if (designOptions.layoutPreset === "polaroid") {
+    context.fillStyle = designOptions.paperColor;
+    context.fillRect(photoBox.x, captionTop, photoBox.width, captionHeight);
+    context.textAlign = "center";
+    context.fillStyle = "#30312c";
+    context.font = titleFont;
+    const titleBaseline = captionTop + captionHeight * (subtitleText ? 0.58 : 0.68);
+    if (titleText) context.fillText(titleText, photoBox.x + photoBox.width / 2, titleBaseline, photoBox.width - margin);
+    if (subtitleText) {
+      context.fillStyle = "#777970";
+      context.font = subtitleFont;
+      context.fillText(subtitleText, photoBox.x + photoBox.width / 2, captionTop + captionHeight - mmToPx(3), photoBox.width - margin);
+    }
+  } else if (designOptions.layoutPreset === "poster") {
+    context.fillStyle = designOptions.paperColor;
+    context.fillRect(0, captionTop, canvas.width, captionHeight);
+    context.fillStyle = designOptions.layoutAccentColor;
+    context.fillRect(margin, captionTop + mmToPx(5), mmToPx(13), Math.max(2, mmToPx(1.2)));
+    context.textAlign = "left";
+    context.fillStyle = "#30312c";
+    context.font = titleFont;
+    if (titleText) context.fillText(titleText, margin, captionTop + mmToPx(17), canvas.width - margin * 2);
+    context.fillStyle = "#777970";
+    context.font = subtitleFont;
+    if (subtitleText) context.fillText(subtitleText, margin, captionTop + mmToPx(24), canvas.width - margin * 2);
+    if (authorText) context.fillText(authorText, margin, canvas.height - mmToPx(4), canvas.width - margin * 2);
+  } else if (designOptions.layoutPreset === "postcard") {
+    context.fillStyle = designOptions.paperColor;
+    context.fillRect(0, captionTop, canvas.width, captionHeight);
+    context.fillStyle = designOptions.layoutAccentColor;
+    context.fillRect(margin, captionTop + mmToPx(4), canvas.width - margin * 2, Math.max(2, mmToPx(0.7)));
+    context.textAlign = "left";
+    context.fillStyle = "#30312c";
+    context.font = titleFont;
+    if (titleText) context.fillText(titleText, margin, captionTop + mmToPx(15), canvas.width * 0.62);
+    context.fillStyle = "#777970";
+    context.font = subtitleFont;
+    if (subtitleText) context.fillText(subtitleText, margin, canvas.height - mmToPx(4), canvas.width * 0.62);
+    if (authorText) {
+      context.textAlign = "right";
+      context.fillStyle = designOptions.layoutAccentColor;
+      context.font = subtitleFont;
+      context.fillText(authorText, canvas.width - margin, captionTop + captionHeight * 0.64, canvas.width * 0.28);
+    }
+  } else if (designOptions.layoutPreset === "album-cover") {
+    const gradientTop = canvas.height * 0.64;
+    const gradient = context.createLinearGradient(0, gradientTop, 0, canvas.height);
+    gradient.addColorStop(0, "rgba(0,0,0,0)");
+    gradient.addColorStop(1, "rgba(0,0,0,0.72)");
+    context.fillStyle = gradient;
+    context.fillRect(0, gradientTop, canvas.width, canvas.height - gradientTop);
+    context.textAlign = "left";
+    context.fillStyle = "#ffffff";
+    context.font = titleFont;
+    if (titleText) context.fillText(titleText, margin, canvas.height - margin - (subtitleText ? subtitleSize * 1.7 : 0), canvas.width - margin * 2);
+    if (subtitleText || authorText) {
+      context.fillStyle = designOptions.layoutAccentColor;
+      context.font = subtitleFont;
+      context.fillText([subtitleText, authorText].filter(Boolean).join("  /  "), margin, canvas.height - margin / 2, canvas.width - margin * 2);
+    }
+  }
+  context.restore();
 }
 
 function drawLightFrameFooter(context: CanvasRenderingContext2D, clipX: number, clipY: number, clipWidth: number, clipHeight: number, x: number, y: number, width: number, height: number, radius: number, dpi: number) {
@@ -650,6 +778,24 @@ function markCollageColumnsCustomized() {
 function onPageOrientationChange(event: Event) {
   designOptions.pageOrientation = (event.currentTarget as HTMLSelectElement).value as PrintDesignOptions["pageOrientation"];
   if (isCollage.value && !collageColumnsCustomized.value) suggestColumnsForPhotos();
+}
+
+function onPhotoLayoutChange() {
+  if (designOptions.layoutPreset !== "classic") {
+    designOptions.lightFrameEnabled = false;
+    designOptions.blurBackground = false;
+    designOptions.fitMode = designOptions.layoutPreset === "album-cover" ? "cover" : "contain";
+  }
+}
+
+function applyRecommendedPhotoLayout() {
+  const imageWidth = photoMetadata.value?.width || decodedImage?.naturalWidth || 0;
+  const imageHeight = photoMetadata.value?.height || decodedImage?.naturalHeight || 0;
+  if (imageWidth > 0 && imageHeight > 0 && selectedTemplate.value.widthMm !== selectedTemplate.value.heightMm) {
+    designOptions.pageOrientation = imageWidth >= imageHeight ? "landscape" : "portrait";
+  }
+  designOptions.layoutPreset = recommendedPhotoLayout.value.id;
+  onPhotoLayoutChange();
 }
 
 function createSelectionOverlay(mask: SubjectMask, inverted: boolean) {
@@ -1257,6 +1403,20 @@ async function addToAssets() {
         <label class="field-label">纸张方向<select :value="designOptions.pageOrientation" @change="onPageOrientationChange"><option value="portrait">竖版</option><option value="landscape">横版</option></select></label>
         <div class="range-label"><div class="range-heading"><span>相纸边框</span><b>{{ designOptions.frameMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.frameMm" type="range" min="0" max="24" step="0.5" aria-label="相纸边框"><input v-model.number="designOptions.frameMm" class="value-input" type="number" min="0" max="24" step="0.5" aria-label="相纸边框毫米"></div></div>
         <label class="field-label color-field">纸张底色<input v-model="designOptions.paperColor" type="color" aria-label="选择纸张底色"></label>
+        <template v-if="!isCollage">
+          <label class="field-label">成品版式<select v-model="designOptions.layoutPreset" @change="onPhotoLayoutChange"><option v-for="preset in photoLayoutPresets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select></label>
+          <div class="layout-recommendation"><span>{{ selectedTemplate.name }} 推荐：{{ recommendedPhotoLayout.name }}</span><button class="text-button" @click="applyRecommendedPhotoLayout">套用</button></div>
+          <template v-if="designOptions.layoutPreset !== 'classic'">
+            <label class="field-label">成品标题<input v-model="designOptions.layoutTitle" type="text" maxlength="48" placeholder="留空时使用作品名称"></label>
+            <label class="field-label">副标题<input v-model="designOptions.layoutSubtitle" type="text" maxlength="72" placeholder="可不填写"></label>
+            <label class="field-label">作者 / 落款<input v-model="designOptions.layoutAuthor" type="text" maxlength="40" placeholder="例如：摄影：小林"></label>
+            <div class="range-label"><div class="range-heading"><span>标题字号</span><b>{{ designOptions.layoutTitleSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.layoutTitleSizeMm" type="range" min="3" max="16" step="0.5" aria-label="版式标题字号"><input v-model.number="designOptions.layoutTitleSizeMm" class="value-input" type="number" min="3" max="16" step="0.5" aria-label="版式标题字号毫米"></div></div>
+            <div class="range-label"><div class="range-heading"><span>副标题字号</span><b>{{ designOptions.layoutSubtitleSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.layoutSubtitleSizeMm" type="range" min="1" max="8" step="0.5" aria-label="版式副标题字号"><input v-model.number="designOptions.layoutSubtitleSizeMm" class="value-input" type="number" min="1" max="8" step="0.5" aria-label="版式副标题字号毫米"></div></div>
+            <label class="field-label color-field">强调色<input v-model="designOptions.layoutAccentColor" type="color" aria-label="选择版式强调色"></label>
+            <p class="adjustment-note">版式会按 {{ selectedTemplate.name }} 的实际纸张比例重新排布。照片不拉伸；标题与底栏也会写入 PNG / PDF。</p>
+          </template>
+        </template>
+        <p v-else class="adjustment-note">当前为多照片拼贴；请在下方选择规整网格或错落拼贴并设置列数、间距。</p>
       </div>
       <div v-if="isCollage" class="control-section">
         <div class="control-title"><h2>多照片拼贴</h2><span class="control-hint">{{ collagePhotos.length }} / 15 张</span></div>
@@ -1294,7 +1454,8 @@ async function addToAssets() {
       </div>
       <div v-if="!isCollage" class="control-section">
         <div class="control-title"><h2>光影边框风格</h2><span class="control-hint">单张照片</span></div>
-        <label class="toggle-field"><input v-model="designOptions.lightFrameEnabled" type="checkbox" :disabled="!imageData"><span>启用清晰主体＋虚化背景＋参数底栏</span></label>
+        <label class="toggle-field"><input v-model="designOptions.lightFrameEnabled" type="checkbox" :disabled="!imageData || designOptions.layoutPreset !== 'classic'"><span>启用清晰主体＋虚化背景＋参数底栏</span></label>
+        <p v-if="designOptions.layoutPreset !== 'classic'" class="adjustment-note">光影边框与成品版式目前分开使用；切回“经典留白”后可启用。</p>
         <div v-if="designOptions.lightFrameEnabled" class="light-frame-options" @pointerdown.capture="beginSelectedPhotoInput" @pointerup.capture="endSelectedPhotoInput" @pointercancel.capture="endSelectedPhotoInput" @keydown.capture="beginSelectedPhotoInput" @change.capture="endSelectedPhotoInput" @focusin.capture="beginSelectedPhotoInput" @focusout.capture="endSelectedPhotoInput">
           <label class="field-label">Logo 文字<input v-model="designOptions.lightFrameLogoText" type="text" maxlength="32" placeholder="留空时自动使用相机品牌"></label>
           <label class="toggle-field"><input v-model="designOptions.lightFrameShowMetadata" type="checkbox"><span>显示镜头与拍摄参数</span></label>
@@ -1378,6 +1539,7 @@ async function addToAssets() {
 .controls{position:static;align-self:stretch;height:100%;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:0 16px;scrollbar-width:thin;scrollbar-color:#d6d7cf transparent}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
 .field-label.color-field input[type=color]{width:100%;height:32px;padding:3px;cursor:pointer}.fit-options{display:grid;grid-template-columns:1fr 1fr;gap:6px}.fit-options .preset-chip{height:34px}.rotate-button{margin-top:13px}.toggle-field{display:flex;align-items:center;gap:8px;color:#6f7168;font-size:10px}.toggle-field input{accent-color:#56594e}
+.layout-recommendation{display:flex;justify-content:space-between;align-items:center;margin-top:9px;padding:9px 10px;border:1px solid #e8e8e2;border-radius:6px;background:#fafaf8;color:#777970;font-size:9px}.layout-recommendation .text-button{color:#56594e;font-weight:600}
 .collage-photo-list{display:grid;gap:6px;margin-top:14px}.collage-photo-row{display:grid;grid-template-columns:18px minmax(0,1fr) 20px 20px 34px;align-items:center;gap:5px;border-bottom:1px solid #f0f0ec;padding:5px 0}.collage-photo-row.selected{background:#f1f2ed;border-radius:5px}.collage-photo-index{color:#9a9b93;font-size:9px;text-align:center}.collage-photo-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#65675e;font-size:9px;border:0;background:transparent;text-align:left;padding:3px 4px;cursor:pointer}.collage-photo-row.selected .collage-photo-name{color:#30312c;font-weight:600}.collage-photo-row .text-button{padding:3px 0}.collage-photo-row .text-button:disabled{opacity:.35}.remove-photo-button{color:#9a6a62!important}.collage-photo-editor{margin-top:16px;padding-top:13px;border-top:1px solid #e8e9e2}.collage-photo-editor h3{font-size:11px;margin:0;font-weight:600}.selected-photo-label{margin:0 0 11px;color:#777970;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.photo-adjustment-list{margin-top:11px;padding-top:10px;border-top:1px solid #efefeb}.light-frame-options{display:grid;gap:8px;margin-top:12px}
 .range-label{display:grid;gap:8px;margin-top:14px}.range-heading{display:flex;justify-content:space-between;align-items:baseline;color:#76786f;font-size:9px}.range-heading label{cursor:pointer}.range-heading b{color:#565850;font-weight:500}.range-inputs{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center}.range-inputs input[type=range]{width:100%;accent-color:#56594e;height:13px}.range-inputs .value-input{width:72px;height:28px;border:1px solid #e5e5df;border-radius:5px;padding:0 5px;color:#4a4b44;background:white;font-size:10px;text-align:right}.range-inputs .value-input:focus{border-color:#a8aa9e;outline:none}
 .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset-chip{height:31px;border:1px solid #e8e8e2;background:white;border-radius:6px;font-size:9px;color:#777970}.preset-chip.selected{border-color:#777a6e;background:#f2f2ee;color:#373930}
