@@ -28,11 +28,38 @@ const redoStack = ref<EditSettings[]>([]);
 const canUndo = computed(() => undoStack.value.length > 0);
 const canRedo = computed(() => redoStack.value.length > 0);
 
+type AdjustmentKey = "exposure" | "contrast" | "highlights" | "shadows" | "temperature" | "tint" | "saturation" | "vibrance" | "warmth" | "subjectExposure" | "subjectContrast";
+interface AdjustmentControl {
+  key: AdjustmentKey;
+  name: string;
+  min: number;
+  max: number;
+  step: number;
+}
+
+const adjustmentControls: AdjustmentControl[] = [
+  { key: "exposure", name: "曝光", min: -3, max: 3, step: 0.1 },
+  { key: "contrast", name: "对比度", min: -50, max: 50, step: 1 },
+  { key: "highlights", name: "高光", min: -100, max: 100, step: 1 },
+  { key: "shadows", name: "阴影", min: -100, max: 100, step: 1 },
+  { key: "temperature", name: "冷暖", min: -100, max: 100, step: 1 },
+  { key: "tint", name: "绿 ↔ 洋红", min: -100, max: 100, step: 1 },
+  { key: "saturation", name: "鲜艳度", min: -100, max: 100, step: 1 },
+  { key: "vibrance", name: "自然饱和度", min: -100, max: 100, step: 1 },
+  { key: "warmth", name: "暖色叠加", min: 0, max: 50, step: 1 }
+];
+const subjectAdjustmentControls: AdjustmentControl[] = [
+  { key: "subjectExposure", name: "选区曝光", min: -3, max: 3, step: 0.1 },
+  { key: "subjectContrast", name: "选区对比度", min: -50, max: 50, step: 1 }
+];
+
 const selectedTemplate = computed(() => printTemplates.find((item) => item.id === templateId.value) || printTemplates[0]!);
 const aspectRatio = computed(() => selectedTemplate.value.widthMm + " / " + selectedTemplate.value.heightMm);
 const filters = ["原片", "明亮", "通透", "鲜活", "暖调", "黑白"];
 const outputDpi = 300;
 const previewMaxEdge = 1400;
+const adjustingPreviewMaxEdge = 720;
+const isAdjustingPreview = ref(false);
 const outputWidth = computed(() => Math.round(selectedTemplate.value.widthMm / 25.4 * outputDpi));
 const outputHeight = computed(() => Math.round(selectedTemplate.value.heightMm / 25.4 * outputDpi));
 
@@ -50,6 +77,7 @@ let decodedImageSource = "";
 let previewFrame = 0;
 let previewRevision = 0;
 let sliderHistoryPending = false;
+let adjustmentEndTimer: ReturnType<typeof setTimeout> | undefined;
 
 onMounted(async () => {
   await studio.refresh();
@@ -74,6 +102,7 @@ watch([imageData, templateId, marginMm, settings], queuePreviewRender, { deep: t
 onBeforeUnmount(() => {
   window.removeEventListener("paste", handlePaste);
   window.removeEventListener("resize", queuePreviewRender);
+  if (adjustmentEndTimer) clearTimeout(adjustmentEndTimer);
   if (previewFrame) cancelAnimationFrame(previewFrame);
   previewRevision++;
 });
@@ -93,7 +122,8 @@ async function renderPreview() {
 
   try {
     const image = await loadPhotoImage(source);
-    if (revision === previewRevision) drawPhoto(canvas, image, previewMaxEdge, subjectMask.value, selectionInverted.value);
+    const maxEdge = isAdjustingPreview.value ? adjustingPreviewMaxEdge : previewMaxEdge;
+    if (revision === previewRevision) drawPhoto(canvas, image, maxEdge, subjectMask.value, selectionInverted.value);
   } catch {
     notice.value = "照片预览处理失败；可以重新导入这张照片再试。";
   }
@@ -296,6 +326,8 @@ function rememberSettings() {
 
 function beginSliderHistory(event?: Event) {
   if (event?.type === "keydown" && !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes((event as KeyboardEvent).key)) return;
+  isAdjustingPreview.value = true;
+  if (adjustmentEndTimer) clearTimeout(adjustmentEndTimer);
   if (sliderHistoryPending) return;
   rememberSettings();
   sliderHistoryPending = true;
@@ -303,6 +335,30 @@ function beginSliderHistory(event?: Event) {
 
 function endSliderHistory() {
   sliderHistoryPending = false;
+  if (adjustmentEndTimer) clearTimeout(adjustmentEndTimer);
+  adjustmentEndTimer = setTimeout(() => {
+    isAdjustingPreview.value = false;
+    adjustmentEndTimer = undefined;
+    queuePreviewRender();
+  }, 160);
+}
+
+function updateAdjustmentInput(event: Event, control: AdjustmentControl) {
+  const input = event.currentTarget as HTMLInputElement;
+  if (!input.value) return;
+  const parsed = Number(input.value);
+  if (!Number.isFinite(parsed)) return;
+  const bounded = Math.min(control.max, Math.max(control.min, parsed));
+  const snapped = control.min + Math.round((bounded - control.min) / control.step) * control.step;
+  const precision = String(control.step).split(".")[1]?.length || 0;
+  settings[control.key] = Number(snapped.toFixed(precision));
+  settings.preset = "自定义";
+}
+
+function finishAdjustmentInput(event: Event, control: AdjustmentControl) {
+  const input = event.currentTarget as HTMLInputElement;
+  input.value = String(settings[control.key]);
+  endSliderHistory();
 }
 
 function undoSettings() {
@@ -568,23 +624,24 @@ async function addToAssets() {
         <p class="adjustment-note">预设是本应用的通用近似效果，不是尼康、佳能或索尼的官方滤镜。</p>
       </div>
       <div class="control-section"><div class="control-title"><h2>手动调整</h2><div class="history-actions"><button class="text-button" :disabled="!canUndo" @click="undoSettings">↶ 撤销</button><button class="text-button" :disabled="!canRedo" @click="redoSettings">↷ 重做</button></div></div>
-        <label v-for="item in [
-          { key: 'exposure', name: '曝光' },
-          { key: 'contrast', name: '对比度' },
-          { key: 'highlights', name: '高光' },
-          { key: 'shadows', name: '阴影' },
-          { key: 'temperature', name: '冷暖' },
-          { key: 'tint', name: '绿 ↔ 洋红' },
-          { key: 'saturation', name: '鲜艳度' },
-          { key: 'vibrance', name: '自然饱和度' },
-          { key: 'warmth', name: '暖色叠加' }
-        ]" :key="item.key" class="range-label"><span>{{ item.name }} <b>{{ formatSetting(item.key) }}</b></span><input v-model.number="settings[item.key as keyof EditSettings]" type="range" :min="item.key === 'exposure' ? -3 : item.key === 'warmth' ? 0 : item.key === 'contrast' ? -50 : -100" :max="item.key === 'exposure' ? 3 : item.key === 'warmth' ? 50 : item.key === 'contrast' ? 50 : 100" :step="item.key === 'exposure' ? 0.1 : 1" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'"></label>
+        <div v-for="item in adjustmentControls" :key="item.key" class="range-label">
+          <div class="range-heading"><label :for="`adjustment-${item.key}`">{{ item.name }}</label><b>{{ formatSetting(item.key) }}</b></div>
+          <div class="range-inputs">
+            <input :id="`adjustment-${item.key}`" v-model.number="settings[item.key]" type="range" :min="item.min" :max="item.max" :step="item.step" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'">
+            <input type="number" class="value-input" :aria-label="item.name + '数值'" :min="item.min" :max="item.max" :step="item.step" :value="settings[item.key]" @focus="beginSliderHistory" @keydown="beginSliderHistory" @input="updateAdjustmentInput($event, item)" @change="endSliderHistory" @blur="finishAdjustmentInput($event, item)">
+          </div>
+        </div>
         <p class="adjustment-note">曝光按 EV 调整；其他值是本工具的相对强度，不等同于 Lightroom 的标尺。冷暖与色调为视觉近似，并非 Kelvin 白平衡。</p>
       </div>
       <div v-if="subjectMask" class="control-section">
         <div class="control-title"><h2>选区局部调整</h2><span class="control-hint">蓝色区域会受影响</span></div>
-        <label class="range-label"><span>选区曝光 <b>{{ formatSetting("subjectExposure") }}</b></span><input v-model.number="settings.subjectExposure" type="range" min="-3" max="3" step="0.1" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'"></label>
-        <label class="range-label"><span>选区对比度 <b>{{ formatSetting("subjectContrast") }}</b></span><input v-model.number="settings.subjectContrast" type="range" min="-50" max="50" step="1" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'"></label>
+        <div v-for="item in subjectAdjustmentControls" :key="item.key" class="range-label">
+          <div class="range-heading"><label :for="`adjustment-${item.key}`">{{ item.name }}</label><b>{{ formatSetting(item.key) }}</b></div>
+          <div class="range-inputs">
+            <input :id="`adjustment-${item.key}`" v-model.number="settings[item.key]" type="range" :min="item.min" :max="item.max" :step="item.step" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'">
+            <input type="number" class="value-input" :aria-label="item.name + '数值'" :min="item.min" :max="item.max" :step="item.step" :value="settings[item.key]" @focus="beginSliderHistory" @keydown="beginSliderHistory" @input="updateAdjustmentInput($event, item)" @change="endSliderHistory" @blur="finishAdjustmentInput($event, item)">
+          </div>
+        </div>
         <p class="adjustment-note">当前模型实际识别的是人物，蓝色是识别概率较高的区域；反选后将影响人物以外区域。蒙版只是近似结果，头发、手指等边缘可能不准，导出不会带上蓝色。</p>
       </div>
       <div class="privacy-note"><span>◉</span><p><b>你的照片留在本机</b><br>作品保存到当前浏览器，不会自动上传。请定期导出备份。</p></div>
@@ -598,13 +655,13 @@ async function addToAssets() {
 .editor-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}.preview-column{min-width:0}.upload-zone{min-height:490px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-style:dashed;background:#fbfbf9;cursor:pointer}.upload-mark{display:grid;place-items:center;width:54px;height:54px;border-radius:18px;background:#efefe9;font-size:24px;color:#686a60}.upload-zone h2{font-size:17px;margin:18px 0 6px}.upload-zone p{font-size:11px;color:#92948b;margin:0 0 18px}.paste-hint{margin-top:14px;color:#7f8178;font-size:10px}.upload-zone small{margin-top:20px;color:#b0b1aa;font-size:9px}
 .preview-wrap{background:#f0f0eb;border:1px solid #e6e6df;border-radius:11px;overflow:hidden}.preview-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;background:#fff}.preview-toolbar span{display:grid;gap:4px}.preview-toolbar b{font-size:11px}.preview-toolbar small{font-size:9px;color:#9a9b93}.preview-actions{display:flex;align-items:center;gap:7px}.canvas-stage{min-height:430px;display:grid;place-items:center;padding:35px;background:#eeeee9}.print-canvas{width:min(74%,410px);max-height:500px;background:white;box-shadow:none;display:flex;align-items:center;justify-content:center;overflow:hidden}.photo-preview-canvas{display:block;width:100%;height:100%;object-fit:contain}.preview-foot{background:#fff;padding:10px 13px;display:flex;justify-content:space-between;font-size:9px;color:#96978f}
 .export-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.export-row>span{font-size:9px;color:#96978e;margin-left:auto}.export-spec{margin-top:7px;color:#72746c;font-size:9px}.notice{margin-top:10px;background:#edf1e9;border:1px solid #e1e8db;padding:10px 12px;border-radius:7px;color:#5f7059;font-size:10px}
-.controls{padding:0 16px}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}
+.controls{position:sticky;top:12px;align-self:start;max-height:calc(100vh - 24px);overflow-y:auto;overscroll-behavior:contain;padding:0 16px;scrollbar-width:thin;scrollbar-color:#d6d7cf transparent}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
-.range-label{display:grid;gap:8px;margin-top:14px}.range-label span{display:flex;justify-content:space-between;color:#76786f;font-size:9px}.range-label b{color:#565850;font-weight:500}.range-label input{width:100%;accent-color:#56594e;height:13px}
+.range-label{display:grid;gap:8px;margin-top:14px}.range-heading{display:flex;justify-content:space-between;align-items:baseline;color:#76786f;font-size:9px}.range-heading label{cursor:pointer}.range-heading b{color:#565850;font-weight:500}.range-inputs{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center}.range-inputs input[type=range]{width:100%;accent-color:#56594e;height:13px}.range-inputs .value-input{width:72px;height:28px;border:1px solid #e5e5df;border-radius:5px;padding:0 5px;color:#4a4b44;background:white;font-size:10px;text-align:right}.range-inputs .value-input:focus{border-color:#a8aa9e;outline:none}
 .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset-chip{height:31px;border:1px solid #e8e8e2;background:white;border-radius:6px;font-size:9px;color:#777970}.preset-chip.selected{border-color:#777a6e;background:#f2f2ee;color:#373930}
 .adjustment-note{margin:10px 0 0;color:#96978e;font-size:9px;line-height:1.6}.preset-custom{margin-top:8px;color:#56594e;font-size:9px}
 .privacy-note{display:flex;gap:9px;padding:14px 0;color:#7c7e75}.privacy-note>span{color:#87977f;font-size:14px}.privacy-note p{margin:0;font-size:9px;line-height:1.7}.privacy-note b{font-size:9px;color:#5b5d55}
-@media(max-width:1000px){.editor-layout{grid-template-columns:1fr}.controls{display:grid;grid-template-columns:1fr 1fr;column-gap:20px}.privacy-note{grid-column:1/-1}}
+@media(max-width:1000px){.editor-layout{grid-template-columns:1fr}.controls{position:static;max-height:none;overflow:visible;display:grid;grid-template-columns:1fr 1fr;column-gap:20px}.privacy-note{grid-column:1/-1}}
 @media(max-width:620px){.editor-heading{align-items:start;flex-direction:column}.workflow{gap:5px;overflow-x:auto}.workflow i{width:12px;flex-shrink:0}.workflow-skip{display:none}.canvas-stage{min-height:340px;padding:20px}.print-canvas{width:min(90%,400px)}.preview-foot{gap:8px;flex-direction:column}.export-row>span{width:100%;margin:0}.controls{display:block}}
 @media(max-width:720px){.preview-toolbar{align-items:flex-start;flex-direction:column}.preview-actions{width:100%;flex-wrap:wrap}}
 </style>
