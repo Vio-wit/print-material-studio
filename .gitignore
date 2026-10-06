@@ -1,0 +1,15 @@
+node_modules/
+.nuxt/
+.output/
+.playwright-cli/
+.data/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+dist/
+coverage/
+*.log

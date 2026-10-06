@@ -1,0 +1,62 @@
+:root {
+  font-family: "DM Sans", "Noto Sans SC", sans-serif;
+  color: #242522;
+  background: #f6f6f3;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+a { color: inherit; text-decoration: none; }
+.app-shell { min-height: 100vh; }
+.sidebar { position: fixed; inset: 0 auto 0 0; width: 244px; padding: 27px 17px 18px; display: flex; flex-direction: column; background: #fff; border-right: 1px solid #eaeae5; z-index: 5; }
+.brand { display: flex; gap: 11px; align-items: center; padding: 0 9px 31px; }
+.brand-mark { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 13px; background: #292a26; color: #fff; font-weight: 700; }
+.brand strong, .brand small { display: block; }
+.brand strong { font-size: 15px; letter-spacing: .04em; }
+.brand small { color: #989990; font-size: 11px; margin-top: 3px; }
+.nav-caption { padding: 0 11px; color: #a0a198; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+.main-nav { display: grid; gap: 5px; }
+.nav-link { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 9px; color: #6e7069; font-size: 13px; }
+.nav-link:hover { background: #f7f7f4; color: #282923; }
+.nav-link.active { color: #22231f; background: #eeefe9; font-weight: 600; }
+.nav-icon { width: 19px; text-align: center; font-size: 17px; }
+.sidebar-bottom { margin-top: auto; display: flex; align-items: center; gap: 8px; border-top: 1px solid #efefe9; padding: 17px 9px 3px; font-size: 11px; color: #83857c; }
+.local-dot { width: 7px; height: 7px; border-radius: 100%; background: #79a984; }
+.main-area { margin-left: 244px; min-height: 100vh; }
+.topbar { height: 65px; padding: 0 42px; background: rgba(255,255,255,.78); border-bottom: 1px solid #eaeae5; display: flex; align-items: center; justify-content: space-between; }
+.breadcrumbs { color: #9a9b94; font-size: 12px; }
+.breadcrumbs span { padding: 0 9px; color: #c6c7c0; }
+.breadcrumbs b { color: #484a43; font-weight: 500; }
+.topbar-tag { font-size: 10px; color: #888a81; background: #f2f2ee; padding: 6px 10px; border-radius: 20px; }
+.page-container { max-width: 1440px; margin: 0 auto; padding: 35px 42px 64px; }
+.eyebrow { color: #84867d; font-size: 10px; letter-spacing: .15em; text-transform: uppercase; }
+.page-title { margin: 8px 0 8px; font-size: clamp(26px, 3vw, 36px); line-height: 1.2; letter-spacing: -.04em; font-weight: 600; }
+.page-subtitle { color: #85877f; font-size: 13px; line-height: 1.7; margin: 0; }
+.button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 0 16px; border: 1px solid #dedfd8; border-radius: 8px; background: white; color: #373932; font-size: 12px; font-weight: 600; }
+.button:hover { border-color: #b9bbb1; background: #fafaf8; }
+.button.primary { color: white; background: #30312c; border-color: #30312c; }
+.button.primary:hover { background: #484941; }
+.button.small { min-height: 33px; padding: 0 11px; font-size: 11px; }
+.button.danger { color: #a7483a; }
+.card { background: white; border: 1px solid #e9e9e4; border-radius: 12px; }
+.section-heading { display: flex; justify-content: space-between; align-items: end; margin: 30px 0 13px; }
+.section-heading h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.section-heading p { margin: 5px 0 0; color: #92938c; font-size: 11px; }
+.muted { color: #92938c; }
+.empty-state { text-align: center; padding: 49px 20px; color: #91938b; font-size: 12px; }
+.empty-symbol { margin: 0 auto 14px; width: 45px; height: 45px; border-radius: 14px; display: grid; place-items: center; background: #f3f3ef; color: #73756d; font-size: 20px; }
+@media (max-width: 820px) {
+  .sidebar { width: 68px; padding: 15px 8px; align-items: center; }
+  .brand { padding: 0 0 24px; }
+  .brand > span:last-child, .nav-caption, .nav-link { font-size: 0; }
+  .nav-link { width: 46px; height: 44px; justify-content: center; padding: 0; }
+  .nav-icon { font-size: 17px; }
+  .sidebar-bottom { font-size: 0; padding-inline: 0; }
+  .main-area { margin-left: 68px; }
+  .topbar { padding: 0 20px; }
+  .page-container { padding: 27px 20px 50px; }
+}

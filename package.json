@@ -1,0 +1,23 @@
+{
+  "name": "print-material-studio",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "dev:api": ".\\.venv\\Scripts\\python.exe -m uvicorn api.main:app --reload --port 8000",
+    "dev:all": "concurrently -k \"npm:dev\" \"npm:dev:api\"",
+    "build": "nuxt build",
+    "typecheck": "nuxt prepare && vue-tsc --noEmit -p .nuxt/tsconfig.app.json",
+    "preview": "nuxt preview"
+  },
+  "dependencies": {
+    "nuxt": "^4.6.0",
+    "pdf-lib": "^1.17.1",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0",
+    "typescript": "5.9.3",
+    "vue-tsc": "^3.3.12"
+  }
+}
