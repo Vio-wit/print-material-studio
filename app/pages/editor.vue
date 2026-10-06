@@ -55,7 +55,8 @@ const subjectAdjustmentControls: AdjustmentControl[] = [
 
 const selectedTemplate = computed(() => printTemplates.find((item) => item.id === templateId.value) || printTemplates[0]!);
 const aspectRatio = computed(() => selectedTemplate.value.widthMm + " / " + selectedTemplate.value.heightMm);
-const filters = ["原片", "明亮", "通透", "鲜活", "暖调", "黑白"];
+const basicFilters = ["原片", "明亮", "通透", "鲜活", "暖调", "黑白"];
+const moodFilters = ["暖胶片", "褪色复古", "冷调电影", "柔和人像", "日系清透"];
 const outputDpi = 300;
 const previewMaxEdge = 1400;
 const adjustingPreviewMaxEdge = 720;
@@ -69,7 +70,12 @@ const presetSettings: Record<string, Omit<EditSettings, "preset">> = {
   "通透": { exposure: 0, contrast: 10, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0, subjectExposure: 0, subjectContrast: 0 },
   "鲜活": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 18, warmth: 0, subjectExposure: 0, subjectContrast: 0 },
   "暖调": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 15, subjectExposure: 0, subjectContrast: 0 },
-  "黑白": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: -100, vibrance: 0, warmth: 0, subjectExposure: 0, subjectContrast: 0 }
+  "黑白": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: -100, vibrance: 0, warmth: 0, subjectExposure: 0, subjectContrast: 0 },
+  "暖胶片": { exposure: 0.1, contrast: -8, highlights: -15, shadows: 10, temperature: 14, tint: 3, saturation: -12, vibrance: 7, warmth: 10, subjectExposure: 0, subjectContrast: 0 },
+  "褪色复古": { exposure: 0.05, contrast: -18, highlights: -5, shadows: 18, temperature: 8, tint: 2, saturation: -24, vibrance: -8, warmth: 12, subjectExposure: 0, subjectContrast: 0 },
+  "冷调电影": { exposure: -0.1, contrast: 12, highlights: -18, shadows: 9, temperature: -12, tint: -2, saturation: -12, vibrance: 2, warmth: 0, subjectExposure: 0, subjectContrast: 0 },
+  "柔和人像": { exposure: 0.15, contrast: -8, highlights: -20, shadows: 18, temperature: 3, tint: 2, saturation: -8, vibrance: 4, warmth: 2, subjectExposure: 0, subjectContrast: 0 },
+  "日系清透": { exposure: 0.15, contrast: -6, highlights: -10, shadows: 14, temperature: 4, tint: 4, saturation: -6, vibrance: 12, warmth: 4, subjectExposure: 0, subjectContrast: 0 }
 };
 
 let decodedImage: HTMLImageElement | null = null;
@@ -618,10 +624,13 @@ async function addToAssets() {
         <label class="field-label">纸张尺寸<select v-model="templateId"><option v-for="item in printTemplates" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
         <label class="range-label"><span>纸张留白 <b>{{ marginMm }} mm</b></span><input v-model.number="marginMm" type="range" min="0" max="20" step="1"></label>
       </div>
-      <div class="control-section"><div class="control-title"><h2>快速色调</h2><span class="control-hint">可叠加微调</span></div>
-        <div class="preset-grid"><button v-for="filter in filters" :key="filter" class="preset-chip" :class="{ selected: settings.preset === filter }" @click="applyPreset(filter)">{{ filter }}</button></div>
+      <div class="control-section"><div class="control-title"><h2>快速色调</h2><span class="control-hint">应用后可继续微调</span></div>
+        <div class="preset-groups">
+          <div class="preset-group"><span class="preset-group-title">基础</span><div class="preset-grid"><button v-for="filter in basicFilters" :key="filter" class="preset-chip" :class="{ selected: settings.preset === filter }" @click="applyPreset(filter)">{{ filter }}</button></div></div>
+          <div class="preset-group"><span class="preset-group-title">氛围配方</span><div class="preset-grid"><button v-for="filter in moodFilters" :key="filter" class="preset-chip" :class="{ selected: settings.preset === filter }" @click="applyPreset(filter)">{{ filter }}</button></div></div>
+        </div>
         <div v-if="settings.preset === '自定义'" class="preset-custom" role="status">自定义 · 参数已按下面滑杆显示</div>
-        <p class="adjustment-note">预设是本应用的通用近似效果，不是尼康、佳能或索尼的官方滤镜。</p>
+        <p class="adjustment-note">氛围配方由本工具的基础参数组合，不是相机厂商官方滤镜，也不含胶片颗粒、漏光或光晕纹理。</p>
       </div>
       <div class="control-section"><div class="control-title"><h2>手动调整</h2><div class="history-actions"><button class="text-button" :disabled="!canUndo" @click="undoSettings">↶ 撤销</button><button class="text-button" :disabled="!canRedo" @click="redoSettings">↷ 重做</button></div></div>
         <div v-for="item in adjustmentControls" :key="item.key" class="range-label">
@@ -659,6 +668,7 @@ async function addToAssets() {
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
 .range-label{display:grid;gap:8px;margin-top:14px}.range-heading{display:flex;justify-content:space-between;align-items:baseline;color:#76786f;font-size:9px}.range-heading label{cursor:pointer}.range-heading b{color:#565850;font-weight:500}.range-inputs{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center}.range-inputs input[type=range]{width:100%;accent-color:#56594e;height:13px}.range-inputs .value-input{width:72px;height:28px;border:1px solid #e5e5df;border-radius:5px;padding:0 5px;color:#4a4b44;background:white;font-size:10px;text-align:right}.range-inputs .value-input:focus{border-color:#a8aa9e;outline:none}
 .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset-chip{height:31px;border:1px solid #e8e8e2;background:white;border-radius:6px;font-size:9px;color:#777970}.preset-chip.selected{border-color:#777a6e;background:#f2f2ee;color:#373930}
+.preset-groups{display:grid;gap:12px}.preset-group{display:grid;gap:6px}.preset-group-title{font-size:9px;color:#96978e}
 .adjustment-note{margin:10px 0 0;color:#96978e;font-size:9px;line-height:1.6}.preset-custom{margin-top:8px;color:#56594e;font-size:9px}
 .privacy-note{display:flex;gap:9px;padding:14px 0;color:#7c7e75}.privacy-note>span{color:#87977f;font-size:14px}.privacy-note p{margin:0;font-size:9px;line-height:1.7}.privacy-note b{font-size:9px;color:#5b5d55}
 @media(max-width:1000px){.editor-layout{grid-template-columns:1fr}.controls{position:static;max-height:none;overflow:visible;display:grid;grid-template-columns:1fr 1fr;column-gap:20px}.privacy-note{grid-column:1/-1}}
