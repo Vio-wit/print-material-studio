@@ -4,7 +4,7 @@ import { printTemplates } from "../composables/useTemplates";
 import { useLocalStudio } from "../composables/useLocalStudio";
 import { applyPhotoAdjustments } from "../utils/photo-adjustments";
 import { segmentPerson } from "../utils/person-segmentation";
-import type { EditSettings, StudioWork, SubjectMask } from "../types/studio";
+import type { EditSettings, PrintDesignOptions, StudioWork, SubjectMask } from "../types/studio";
 
 const route = useRoute();
 const studio = useLocalStudio();
@@ -13,7 +13,11 @@ const imageData = ref("");
 const fileName = ref("");
 const title = ref("未命名作品");
 const templateId = ref("photo-4x6");
-const marginMm = ref(6);
+const defaultDesignOptions: PrintDesignOptions = {
+  fitMode: "contain", zoomPercent: 100, offsetX: 0, offsetY: 0, rotation: 0,
+  frameMm: 6, paperColor: "#ffffff", blurBackground: false, backgroundZoom: 125, backgroundBlur: 18
+};
+const designOptions = reactive<PrintDesignOptions>({ ...defaultDesignOptions });
 const busy = ref(false);
 const notice = ref("");
 const cameraInfo = ref("");
@@ -96,6 +100,7 @@ onMounted(async () => {
     title.value = work.title;
     templateId.value = work.templateId;
     Object.assign(settings, migrateLegacySettings(work.settings));
+    Object.assign(designOptions, defaultDesignOptions, work.designOptions || {});
     if (work.subjectSelection === "person" || work.subjectSelection === "inverse-person") {
       selectionInverted.value = work.subjectSelection === "inverse-person";
       void selectSubject();
@@ -104,7 +109,7 @@ onMounted(async () => {
   window.addEventListener("paste", handlePaste);
   window.addEventListener("resize", queuePreviewRender);
 });
-watch([imageData, templateId, marginMm, settings], queuePreviewRender, { deep: true, flush: "post" });
+watch([imageData, templateId, settings, designOptions], queuePreviewRender, { deep: true, flush: "post" });
 onBeforeUnmount(() => {
   window.removeEventListener("paste", handlePaste);
   window.removeEventListener("resize", queuePreviewRender);
@@ -152,30 +157,71 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("无法创建照片预览画布");
 
-  context.fillStyle = "#ffffff";
+  context.fillStyle = designOptions.paperColor;
   context.fillRect(0, 0, canvas.width, canvas.height);
   const dpi = canvas.width / (selectedTemplate.value.widthMm / 25.4);
-  const inset = Math.round(marginMm.value / 25.4 * dpi);
+  const inset = Math.round(designOptions.frameMm / 25.4 * dpi);
   const maxWidth = Math.max(1, canvas.width - inset * 2);
   const maxHeight = Math.max(1, canvas.height - inset * 2);
-  const imageScale = Math.min(maxWidth / image.naturalWidth, maxHeight / image.naturalHeight);
-  const width = Math.max(1, Math.round(image.naturalWidth * imageScale));
-  const height = Math.max(1, Math.round(image.naturalHeight * imageScale));
-  const x = Math.round((canvas.width - width) / 2);
-  const y = Math.round((canvas.height - height) / 2);
-  context.drawImage(image, x, y, width, height);
-  const pixels = context.getImageData(x, y, width, height);
-  applyPhotoAdjustments(pixels.data, width, height, settings, mask, invertMask);
-  context.putImageData(pixels, x, y);
-  if (mask) drawSelectionOverlay(context, mask, x, y, width, height, invertMask);
+  const rotated = designOptions.rotation % 180 !== 0;
+  const fitWidth = rotated ? image.naturalHeight : image.naturalWidth;
+  const fitHeight = rotated ? image.naturalWidth : image.naturalHeight;
+  const fitScale = designOptions.fitMode === "cover"
+    ? Math.max(maxWidth / fitWidth, maxHeight / fitHeight)
+    : Math.min(maxWidth / fitWidth, maxHeight / fitHeight);
+  const imageScale = fitScale * designOptions.zoomPercent / 100;
+  const photoWidth = Math.max(1, Math.round(image.naturalWidth * imageScale));
+  const photoHeight = Math.max(1, Math.round(image.naturalHeight * imageScale));
+
+  const photoLayer = document.createElement("canvas");
+  photoLayer.width = photoWidth;
+  photoLayer.height = photoHeight;
+  const photoContext = photoLayer.getContext("2d", { willReadFrequently: true });
+  if (!photoContext) throw new Error("无法创建照片处理图层");
+  photoContext.drawImage(image, 0, 0, photoWidth, photoHeight);
+  const pixels = photoContext.getImageData(0, 0, photoWidth, photoHeight);
+  applyPhotoAdjustments(pixels.data, photoWidth, photoHeight, settings, mask, invertMask);
+  photoContext.putImageData(pixels, 0, 0);
+
+  if (designOptions.blurBackground) {
+    const backgroundScale = Math.max(canvas.width / photoWidth, canvas.height / photoHeight) * designOptions.backgroundZoom / 100;
+    const backgroundWidth = photoWidth * backgroundScale;
+    const backgroundHeight = photoHeight * backgroundScale;
+    const previewScale = canvas.width / outputWidth.value;
+    context.save();
+    context.filter = `blur(${designOptions.backgroundBlur * previewScale}px)`;
+    context.drawImage(photoLayer, (canvas.width - backgroundWidth) / 2, (canvas.height - backgroundHeight) / 2, backgroundWidth, backgroundHeight);
+    context.restore();
+  }
+
+  const areaX = inset;
+  const areaY = inset;
+  const centerX = areaX + maxWidth / 2;
+  const centerY = areaY + maxHeight / 2;
+  const displayedWidth = rotated ? photoHeight : photoWidth;
+  const displayedHeight = rotated ? photoWidth : photoHeight;
+  const offsetX = Math.abs(displayedWidth - maxWidth) / 2 * designOptions.offsetX / 100;
+  const offsetY = Math.abs(displayedHeight - maxHeight) / 2 * designOptions.offsetY / 100;
+  context.save();
+  context.beginPath();
+  context.rect(areaX, areaY, maxWidth, maxHeight);
+  context.clip();
+  context.translate(centerX + offsetX, centerY + offsetY);
+  context.rotate(designOptions.rotation * Math.PI / 180);
+  context.drawImage(photoLayer, -photoWidth / 2, -photoHeight / 2, photoWidth, photoHeight);
+  if (mask) {
+    const overlay = createSelectionOverlay(mask, invertMask);
+    context.drawImage(overlay, -photoWidth / 2, -photoHeight / 2, photoWidth, photoHeight);
+  }
+  context.restore();
 }
 
-function drawSelectionOverlay(context: CanvasRenderingContext2D, mask: SubjectMask, x: number, y: number, width: number, height: number, inverted: boolean) {
+function createSelectionOverlay(mask: SubjectMask, inverted: boolean) {
   const overlay = document.createElement("canvas");
   overlay.width = mask.width;
   overlay.height = mask.height;
   const overlayContext = overlay.getContext("2d");
-  if (!overlayContext) return;
+  if (!overlayContext) return overlay;
   const pixels = overlayContext.createImageData(mask.width, mask.height);
   for (let index = 0; index < mask.data.length; index++) {
     const offset = index * 4;
@@ -186,7 +232,7 @@ function drawSelectionOverlay(context: CanvasRenderingContext2D, mask: SubjectMa
     pixels.data[offset + 3] = Math.round((inverted ? 1 - confidence : confidence) * 90);
   }
   overlayContext.putImageData(pixels, 0, 0);
-  context.drawImage(overlay, x, y, width, height);
+  return overlay;
 }
 
 function setImage(file: File) {
@@ -325,6 +371,18 @@ function invertSubjectSelection() {
     : "已恢复人物选区：蓝色显示人物，局部调整会作用于人物。";
 }
 
+function rotatePhoto() {
+  designOptions.rotation = ((designOptions.rotation + 90) % 360) as PrintDesignOptions["rotation"];
+}
+
+function resetPhotoLayout() {
+  designOptions.fitMode = "contain";
+  designOptions.zoomPercent = 100;
+  designOptions.offsetX = 0;
+  designOptions.offsetY = 0;
+  designOptions.rotation = 0;
+}
+
 function rememberSettings() {
   undoStack.value = [...undoStack.value.slice(-39), { ...settings }];
   redoStack.value = [];
@@ -398,30 +456,12 @@ function resetSettings() {
 }
 
 async function createExportCanvas(): Promise<HTMLCanvasElement> {
-  const dpi = outputDpi;
   const canvas = document.createElement("canvas");
-  canvas.width = Math.round(selectedTemplate.value.widthMm / 25.4 * dpi);
-  canvas.height = Math.round(selectedTemplate.value.heightMm / 25.4 * dpi);
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) throw new Error("无法创建图片画布");
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  if (!imageData.value) return canvas;
+  if (!imageData.value) throw new Error("请先导入照片");
   const image = new Image();
   image.src = imageData.value;
   await image.decode();
-  const inset = Math.round(marginMm.value / 25.4 * dpi);
-  const maxWidth = canvas.width - inset * 2;
-  const maxHeight = canvas.height - inset * 2;
-  const scale = Math.min(maxWidth / image.naturalWidth, maxHeight / image.naturalHeight);
-  const width = Math.max(1, Math.round(image.naturalWidth * scale));
-  const height = Math.max(1, Math.round(image.naturalHeight * scale));
-  const x = Math.round((canvas.width - width) / 2);
-  const y = Math.round((canvas.height - height) / 2);
-  context.drawImage(image, x, y, width, height);
-  const pixels = context.getImageData(x, y, width, height);
-  applyPhotoAdjustments(pixels.data, width, height, settings, subjectMask.value, selectionInverted.value);
-  context.putImageData(pixels, x, y);
+  drawPhoto(canvas, image, Math.max(outputWidth.value, outputHeight.value), subjectMask.value, selectionInverted.value);
   return canvas;
 }
 
@@ -441,7 +481,7 @@ async function exportPng() {
     const rawBlob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("PNG 导出失败")), "image/png"));
     const blob = await addPngDpiMetadata(rawBlob, outputDpi);
     downloadBlob(blob, ".png");
-    notice.value = "已导出 " + outputWidth.value + " × " + outputHeight.value + " px PNG，并写入 300 DPI 分辨率标记；照片按比例放入画布。";
+    notice.value = "已导出 " + outputWidth.value + " × " + outputHeight.value + " px PNG，并写入 300 DPI 分辨率标记；结果按当前裁切、边框和底色设置生成。";
   } catch (error) {
     notice.value = error instanceof Error ? error.message : "导出失败";
   }
@@ -540,6 +580,7 @@ async function saveToWorks() {
       imageData: imageData.value,
       templateId: templateId.value,
       settings: { ...settings },
+      designOptions: { ...designOptions },
       ...(subjectMask.value ? { subjectSelection: selectionInverted.value ? "inverse-person" as const : "person" as const } : {}),
       updatedAt: new Date().toISOString()
     };
@@ -623,7 +664,26 @@ async function addToAssets() {
       <div class="control-section"><div class="control-title"><h2>画面设置</h2><button class="text-button" @click="resetSettings">重置</button></div>
         <label class="field-label">作品名称<input v-model="title" type="text" maxlength="80" placeholder="给这件作品起个名字"></label>
         <label class="field-label">纸张尺寸<select v-model="templateId"><option v-for="item in printTemplates" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-        <label class="range-label"><span>纸张留白 <b>{{ marginMm }} mm</b></span><input v-model.number="marginMm" type="range" min="0" max="20" step="1"></label>
+        <div class="range-label"><div class="range-heading"><span>相纸边框</span><b>{{ designOptions.frameMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.frameMm" type="range" min="0" max="24" step="0.5" aria-label="相纸边框"><input v-model.number="designOptions.frameMm" class="value-input" type="number" min="0" max="24" step="0.5" aria-label="相纸边框毫米"></div></div>
+        <label class="field-label color-field">纸张底色<input v-model="designOptions.paperColor" type="color" aria-label="选择纸张底色"></label>
+      </div>
+      <div class="control-section">
+        <div class="control-title"><h2>裁切与放大</h2><button class="text-button" :disabled="!imageData" @click="resetPhotoLayout">重置位置</button></div>
+        <div class="fit-options"><button class="preset-chip" :class="{ selected: designOptions.fitMode === 'contain' }" :aria-pressed="designOptions.fitMode === 'contain'" :disabled="!imageData" @click="designOptions.fitMode = 'contain'">完整显示</button><button class="preset-chip" :class="{ selected: designOptions.fitMode === 'cover' }" :aria-pressed="designOptions.fitMode === 'cover'" :disabled="!imageData" @click="designOptions.fitMode = 'cover'">填满裁切</button></div>
+        <div class="range-label"><div class="range-heading"><span>照片放大</span><b>{{ designOptions.zoomPercent }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.zoomPercent" type="range" min="100" max="300" step="1" aria-label="照片放大" :disabled="!imageData"><input v-model.number="designOptions.zoomPercent" class="value-input" type="number" min="100" max="300" step="1" aria-label="照片放大百分比" :disabled="!imageData"></div></div>
+        <div class="range-label"><div class="range-heading"><span>左右位置</span><b>{{ designOptions.offsetX }}</b></div><div class="range-inputs"><input v-model.number="designOptions.offsetX" type="range" min="-100" max="100" step="1" aria-label="左右位置" :disabled="!imageData"><input v-model.number="designOptions.offsetX" class="value-input" type="number" min="-100" max="100" step="1" aria-label="左右位置数值" :disabled="!imageData"></div></div>
+        <div class="range-label"><div class="range-heading"><span>上下位置</span><b>{{ designOptions.offsetY }}</b></div><div class="range-inputs"><input v-model.number="designOptions.offsetY" type="range" min="-100" max="100" step="1" aria-label="上下位置" :disabled="!imageData"><input v-model.number="designOptions.offsetY" class="value-input" type="number" min="-100" max="100" step="1" aria-label="上下位置数值" :disabled="!imageData"></div></div>
+        <button class="button small rotate-button" :disabled="!imageData" @click="rotatePhoto">旋转 90°（当前 {{ designOptions.rotation }}°）</button>
+        <p class="adjustment-note">“填满裁切”会让照片铺满纸张内框，超出部分不导出；可用位置滑杆调整保留区域。原图不改写。</p>
+      </div>
+      <div class="control-section">
+        <div class="control-title"><h2>照片放大虚化背景</h2><span class="control-hint">单张照片</span></div>
+        <label class="toggle-field"><input v-model="designOptions.blurBackground" type="checkbox" :disabled="!imageData"><span>使用照片放大模糊作为底图</span></label>
+        <template v-if="designOptions.blurBackground">
+          <div class="range-label"><div class="range-heading"><span>背景模糊</span><b>{{ designOptions.backgroundBlur }} px</b></div><div class="range-inputs"><input v-model.number="designOptions.backgroundBlur" type="range" min="0" max="48" step="1" aria-label="背景模糊"><input v-model.number="designOptions.backgroundBlur" class="value-input" type="number" min="0" max="48" step="1" aria-label="背景模糊像素"></div></div>
+          <div class="range-label"><div class="range-heading"><span>背景放大</span><b>{{ designOptions.backgroundZoom }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.backgroundZoom" type="range" min="100" max="220" step="1" aria-label="背景放大"><input v-model.number="designOptions.backgroundZoom" class="value-input" type="number" min="100" max="220" step="1" aria-label="背景放大百分比"></div></div>
+        </template>
+        <p class="adjustment-note">模糊背景只用于填满整张纸，前景照片仍保持清晰；浏览器和设备性能会影响大图处理速度。</p>
       </div>
       <div class="control-section"><div class="control-title"><h2>快速色调</h2><span class="control-hint">应用后可继续微调</span></div>
         <div class="preset-groups">
@@ -668,6 +728,7 @@ async function addToAssets() {
 .export-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.export-row>span{font-size:9px;color:#96978e;margin-left:auto}.export-spec{margin-top:7px;color:#72746c;font-size:9px}.notice{margin-top:10px;background:#edf1e9;border:1px solid #e1e8db;padding:10px 12px;border-radius:7px;color:#5f7059;font-size:10px}
 .controls{position:static;align-self:stretch;height:100%;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:0 16px;scrollbar-width:thin;scrollbar-color:#d6d7cf transparent}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
+.field-label.color-field input[type=color]{width:100%;height:32px;padding:3px;cursor:pointer}.fit-options{display:grid;grid-template-columns:1fr 1fr;gap:6px}.fit-options .preset-chip{height:34px}.rotate-button{margin-top:13px}.toggle-field{display:flex;align-items:center;gap:8px;color:#6f7168;font-size:10px}.toggle-field input{accent-color:#56594e}
 .range-label{display:grid;gap:8px;margin-top:14px}.range-heading{display:flex;justify-content:space-between;align-items:baseline;color:#76786f;font-size:9px}.range-heading label{cursor:pointer}.range-heading b{color:#565850;font-weight:500}.range-inputs{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center}.range-inputs input[type=range]{width:100%;accent-color:#56594e;height:13px}.range-inputs .value-input{width:72px;height:28px;border:1px solid #e5e5df;border-radius:5px;padding:0 5px;color:#4a4b44;background:white;font-size:10px;text-align:right}.range-inputs .value-input:focus{border-color:#a8aa9e;outline:none}
 .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset-chip{height:31px;border:1px solid #e8e8e2;background:white;border-radius:6px;font-size:9px;color:#777970}.preset-chip.selected{border-color:#777a6e;background:#f2f2ee;color:#373930}
 .preset-groups{display:grid;gap:12px}.preset-group{display:grid;gap:6px}.preset-group-title{font-size:9px;color:#96978e}

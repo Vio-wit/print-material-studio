@@ -19,12 +19,26 @@ export interface SubjectMask {
   height: number;
 }
 
+export interface PrintDesignOptions {
+  fitMode: "contain" | "cover";
+  zoomPercent: number;
+  offsetX: number;
+  offsetY: number;
+  rotation: 0 | 90 | 180 | 270;
+  frameMm: number;
+  paperColor: string;
+  blurBackground: boolean;
+  backgroundZoom: number;
+  backgroundBlur: number;
+}
+
 export interface StudioWork {
   id: string;
   title: string;
   imageData: string;
   templateId: string;
   settings: EditSettings;
+  designOptions?: Partial<PrintDesignOptions>;
   subjectSelection?: "person" | "inverse-person";
   updatedAt: string;
 }
