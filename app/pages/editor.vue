@@ -17,6 +17,9 @@ const templateId = ref("photo-4x6");
 const defaultDesignOptions: PrintDesignOptions = {
   fitMode: "contain", zoomPercent: 100, offsetX: 0, offsetY: 0, rotation: 0,
   frameMm: 6, paperColor: "#ffffff", blurBackground: false, backgroundZoom: 125, backgroundBlur: 18,
+  lightFrameEnabled: false, lightFrameRadiusMm: 1.5, lightFrameLogoText: "", lightFrameLogoSizeMm: 3.5,
+  lightFrameMetadataSizeMm: 2, lightFrameLogoColor: "#ffffff", lightFrameBorderMm: 3, lightFrameBottomMm: 12,
+  lightFrameShadowSizeMm: 5, lightFrameShadowDepth: 42, lightFrameShadowColor: "#808080", lightFrameShowMetadata: true,
   watermarkEnabled: false, watermarkText: "", watermarkIncludeMetadata: false,
   watermarkFontSizeMm: 3, watermarkOpacity: 80, watermarkColor: "#ffffff", watermarkPosition: "bottom-right",
   collageLayout: "grid", collageColumns: 5, collageGapMm: 3, pageOrientation: "portrait"
@@ -187,6 +190,53 @@ async function loadPhotoImage(source: string) {
   return image;
 }
 
+function traceRoundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  const safeRadius = Math.max(0, Math.min(radius, width / 2, height / 2));
+  context.beginPath();
+  context.moveTo(x + safeRadius, y);
+  context.lineTo(x + width - safeRadius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
+  context.lineTo(x + width, y + height - safeRadius);
+  context.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
+  context.lineTo(x + safeRadius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
+  context.lineTo(x, y + safeRadius);
+  context.quadraticCurveTo(x, y, x + safeRadius, y);
+  context.closePath();
+}
+
+function colorWithAlpha(color: string, alpha: number) {
+  const match = /^#?([\da-f]{6})$/i.exec(color);
+  if (!match) return `rgba(128,128,128,${Math.max(0, Math.min(1, alpha))})`;
+  const value = Number.parseInt(match[1]!, 16);
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
+  return `rgba(${red},${green},${blue},${Math.max(0, Math.min(1, alpha))})`;
+}
+
+function drawRoundedPhotoShadow(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number, blur: number, offsetY: number, color: string) {
+  const padding = Math.ceil(blur * 2 + Math.abs(offsetY));
+  const shadowCanvas = document.createElement("canvas");
+  shadowCanvas.width = Math.max(1, Math.ceil(width + padding * 2));
+  shadowCanvas.height = Math.max(1, Math.ceil(height + padding * 2));
+  const shadowContext = shadowCanvas.getContext("2d");
+  if (!shadowContext) return;
+
+  traceRoundedRect(shadowContext, padding, padding, width, height, radius);
+  shadowContext.fillStyle = "#000000";
+  shadowContext.shadowColor = color;
+  shadowContext.shadowBlur = blur;
+  shadowContext.shadowOffsetY = offsetY;
+  shadowContext.fill();
+
+  shadowContext.globalCompositeOperation = "destination-out";
+  traceRoundedRect(shadowContext, padding, padding, width, height, radius);
+  shadowContext.fillStyle = "#000000";
+  shadowContext.fill();
+  context.drawImage(shadowCanvas, x - padding, y - padding);
+}
+
 function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: number, mask: SubjectMask | null, invertMask = false, showSelectionOverlay = false) {
   const scale = Math.min(1, maxEdge / Math.max(outputWidth.value, outputHeight.value));
   canvas.width = Math.max(1, Math.round(outputWidth.value * scale));
@@ -197,9 +247,12 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   context.fillStyle = designOptions.paperColor;
   context.fillRect(0, 0, canvas.width, canvas.height);
   const dpi = canvas.width / (pageWidthMm.value / 25.4);
-  const inset = Math.round(designOptions.frameMm / 25.4 * dpi);
+  const frameSizeMm = designOptions.lightFrameEnabled ? designOptions.lightFrameBorderMm : designOptions.frameMm;
+  const inset = Math.round(frameSizeMm / 25.4 * dpi);
   const maxWidth = Math.max(1, canvas.width - inset * 2);
   const maxHeight = Math.max(1, canvas.height - inset * 2);
+  const areaX = inset;
+  const areaY = inset;
   const rotated = designOptions.rotation % 180 !== 0;
   const fitWidth = rotated ? image.naturalHeight : image.naturalWidth;
   const fitHeight = rotated ? image.naturalWidth : image.naturalHeight;
@@ -220,7 +273,7 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   applyPhotoAdjustments(pixels.data, photoWidth, photoHeight, settings, mask, invertMask);
   photoContext.putImageData(pixels, 0, 0);
 
-  if (designOptions.blurBackground) {
+  if (designOptions.blurBackground || designOptions.lightFrameEnabled) {
     const backgroundScale = Math.max(canvas.width / photoWidth, canvas.height / photoHeight) * designOptions.backgroundZoom / 100;
     const backgroundWidth = photoWidth * backgroundScale;
     const backgroundHeight = photoHeight * backgroundScale;
@@ -231,18 +284,42 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
     context.restore();
   }
 
-  const areaX = inset;
-  const areaY = inset;
   const centerX = areaX + maxWidth / 2;
   const centerY = areaY + maxHeight / 2;
   const displayedWidth = rotated ? photoHeight : photoWidth;
   const displayedHeight = rotated ? photoWidth : photoHeight;
   const offsetX = Math.abs(displayedWidth - maxWidth) / 2 * designOptions.offsetX / 100;
   const offsetY = Math.abs(displayedHeight - maxHeight) / 2 * designOptions.offsetY / 100;
+  const fullBleed = designOptions.fitMode === "cover" || designOptions.zoomPercent > 100;
+  const frameX = fullBleed ? areaX : centerX + offsetX - displayedWidth / 2;
+  const frameY = fullBleed ? areaY : centerY + offsetY - displayedHeight / 2;
+  const frameWidth = fullBleed ? maxWidth : displayedWidth;
+  const frameHeight = fullBleed ? maxHeight : displayedHeight;
+  const cornerRadius = designOptions.lightFrameEnabled
+    ? Math.max(0, designOptions.lightFrameRadiusMm / 25.4 * dpi)
+    : 0;
+  if (designOptions.lightFrameEnabled && designOptions.lightFrameShadowSizeMm > 0 && designOptions.lightFrameShadowDepth > 0) {
+    const shadowBlur = designOptions.lightFrameShadowSizeMm / 25.4 * dpi;
+    drawRoundedPhotoShadow(
+      context,
+      frameX,
+      frameY,
+      frameWidth,
+      frameHeight,
+      cornerRadius,
+      shadowBlur,
+      shadowBlur * 0.16,
+      colorWithAlpha(designOptions.lightFrameShadowColor, designOptions.lightFrameShadowDepth / 100)
+    );
+  }
   context.save();
   context.beginPath();
   context.rect(areaX, areaY, maxWidth, maxHeight);
   context.clip();
+  if (designOptions.lightFrameEnabled) {
+    traceRoundedRect(context, frameX, frameY, frameWidth, frameHeight, cornerRadius);
+    context.clip();
+  }
   context.translate(centerX + offsetX, centerY + offsetY);
   context.rotate(designOptions.rotation * Math.PI / 180);
   context.drawImage(photoLayer, -photoWidth / 2, -photoHeight / 2, photoWidth, photoHeight);
@@ -251,7 +328,77 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
     context.drawImage(overlay, -photoWidth / 2, -photoHeight / 2, photoWidth, photoHeight);
   }
   context.restore();
+  if (designOptions.lightFrameEnabled) drawLightFrameFooter(context, areaX, areaY, maxWidth, maxHeight, frameX, frameY, frameWidth, frameHeight, cornerRadius, dpi);
   if (designOptions.watermarkEnabled) drawWatermark(context, canvas);
+}
+
+function drawLightFrameFooter(context: CanvasRenderingContext2D, clipX: number, clipY: number, clipWidth: number, clipHeight: number, x: number, y: number, width: number, height: number, radius: number, dpi: number) {
+  const footerHeight = Math.min(height, Math.max(0, designOptions.lightFrameBottomMm) / 25.4 * dpi);
+  if (footerHeight < 1) return;
+  const footerTop = y + height - footerHeight;
+  const depth = Math.max(0, Math.min(100, designOptions.lightFrameShadowDepth)) / 100;
+  const gradient = context.createLinearGradient(0, footerTop, 0, footerTop + footerHeight);
+  gradient.addColorStop(0, colorWithAlpha(designOptions.lightFrameShadowColor, 0));
+  gradient.addColorStop(0.24, colorWithAlpha(designOptions.lightFrameShadowColor, depth * 0.58));
+  gradient.addColorStop(1, colorWithAlpha(designOptions.lightFrameShadowColor, depth));
+  context.save();
+  context.beginPath();
+  context.rect(clipX, clipY, clipWidth, clipHeight);
+  context.clip();
+  traceRoundedRect(context, x, y, width, height, radius);
+  context.clip();
+  context.fillStyle = gradient;
+  context.fillRect(x, footerTop, width, footerHeight);
+
+  const metadata = photoMetadata.value;
+  const cameraName = (metadata?.camera || metadata?.make || "").trim();
+  const lensName = (metadata?.lens || "").trim();
+  const exposureDetails = metadata && designOptions.lightFrameShowMetadata
+    ? [
+        metadata.focalLength ? `${metadata.focalLength} mm` : "",
+        metadata.aperture ? `f/${metadata.aperture}` : "",
+        metadata.exposure,
+        metadata.iso ? `ISO ${metadata.iso}` : ""
+      ].filter(Boolean).join("  ")
+    : "";
+  const logoText = designOptions.lightFrameLogoText.trim()
+    || metadata?.make?.replace(/\s+(corporation|inc\.?|co\.?\s*ltd\.?)$/i, "").trim()
+    || "";
+  const timeText = designOptions.lightFrameShowMetadata ? (metadata?.taken_at || "") : "";
+  const fontSize = Math.max(1, designOptions.lightFrameMetadataSizeMm / 25.4 * dpi);
+  const logoSize = Math.max(1, designOptions.lightFrameLogoSizeMm / 25.4 * dpi);
+  const padding = Math.max(2, 3 / 25.4 * dpi);
+  const lineHeight = fontSize * 1.35;
+  const firstBaseline = footerTop + footerHeight - padding - lineHeight;
+  const secondBaseline = firstBaseline - lineHeight;
+  const leftWidth = width * 0.56;
+  const separatorX = x + width * 0.77;
+  const logoX = x + width * 0.67;
+  const rightX = separatorX + padding;
+  const rightWidth = Math.max(1, x + width - padding - rightX);
+  context.fillStyle = designOptions.lightFrameLogoColor;
+  context.textBaseline = "alphabetic";
+  context.textAlign = "left";
+  context.font = `600 ${fontSize}px Arial, sans-serif`;
+  if (cameraName) context.fillText(cameraName, x + padding, firstBaseline, leftWidth);
+  if (designOptions.lightFrameShowMetadata && lensName) context.fillText(lensName, x + padding, secondBaseline, leftWidth);
+  context.textAlign = "right";
+  if (exposureDetails) context.fillText(exposureDetails, x + width - padding, firstBaseline, rightWidth);
+  if (timeText) context.fillText(timeText, x + width - padding, secondBaseline, rightWidth);
+  if (logoText) {
+    context.textAlign = "center";
+    context.font = `italic 600 ${logoSize}px Arial, sans-serif`;
+    context.fillText(logoText, logoX, firstBaseline, width * 0.18);
+  }
+  if (cameraName || lensName || exposureDetails || timeText || logoText) {
+    context.beginPath();
+    context.moveTo(separatorX, footerTop + padding * 0.6);
+    context.lineTo(separatorX, footerTop + footerHeight - padding * 0.6);
+    context.strokeStyle = colorWithAlpha(designOptions.lightFrameLogoColor, 0.72);
+    context.lineWidth = Math.max(1, dpi / 180);
+    context.stroke();
+  }
+  context.restore();
 }
 
 function drawWatermark(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement) {
@@ -1146,6 +1293,26 @@ async function addToAssets() {
         <p class="adjustment-note">“填满裁切”会让照片铺满纸张内框，超出部分不导出；可用位置滑杆调整保留区域。原图不改写。</p>
       </div>
       <div v-if="!isCollage" class="control-section">
+        <div class="control-title"><h2>光影边框风格</h2><span class="control-hint">单张照片</span></div>
+        <label class="toggle-field"><input v-model="designOptions.lightFrameEnabled" type="checkbox" :disabled="!imageData"><span>启用清晰主体＋虚化背景＋参数底栏</span></label>
+        <div v-if="designOptions.lightFrameEnabled" class="light-frame-options" @pointerdown.capture="beginSelectedPhotoInput" @pointerup.capture="endSelectedPhotoInput" @pointercancel.capture="endSelectedPhotoInput" @keydown.capture="beginSelectedPhotoInput" @change.capture="endSelectedPhotoInput" @focusin.capture="beginSelectedPhotoInput" @focusout.capture="endSelectedPhotoInput">
+          <label class="field-label">Logo 文字<input v-model="designOptions.lightFrameLogoText" type="text" maxlength="32" placeholder="留空时自动使用相机品牌"></label>
+          <label class="toggle-field"><input v-model="designOptions.lightFrameShowMetadata" type="checkbox"><span>显示镜头与拍摄参数</span></label>
+          <div class="range-label"><div class="range-heading"><span>照片圆角</span><b>{{ designOptions.lightFrameRadiusMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.lightFrameRadiusMm" type="range" min="0" max="12" step="0.5" aria-label="照片圆角"><input v-model.number="designOptions.lightFrameRadiusMm" class="value-input" type="number" min="0" max="12" step="0.5" aria-label="照片圆角毫米"></div></div>
+          <div class="range-label"><div class="range-heading"><span>Logo 大小</span><b>{{ designOptions.lightFrameLogoSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.lightFrameLogoSizeMm" type="range" min="1" max="8" step="0.5" aria-label="Logo 大小"><input v-model.number="designOptions.lightFrameLogoSizeMm" class="value-input" type="number" min="1" max="8" step="0.5" aria-label="Logo 大小毫米"></div></div>
+          <div class="range-label"><div class="range-heading"><span>参数字号</span><b>{{ designOptions.lightFrameMetadataSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.lightFrameMetadataSizeMm" type="range" min="1" max="5" step="0.25" aria-label="参数字号"><input v-model.number="designOptions.lightFrameMetadataSizeMm" class="value-input" type="number" min="1" max="5" step="0.25" aria-label="参数字号毫米"></div></div>
+          <label class="field-label color-field">Logo / 参数颜色<input v-model="designOptions.lightFrameLogoColor" type="color" aria-label="选择Logo和参数文字颜色"></label>
+          <div class="range-label"><div class="range-heading"><span>背景模糊</span><b>{{ designOptions.backgroundBlur }} px</b></div><div class="range-inputs"><input v-model.number="designOptions.backgroundBlur" type="range" min="0" max="48" step="1" aria-label="光影边框背景模糊"><input v-model.number="designOptions.backgroundBlur" class="value-input" type="number" min="0" max="48" step="1" aria-label="光影边框背景模糊像素"></div></div>
+          <div class="range-label"><div class="range-heading"><span>背景放大</span><b>{{ designOptions.backgroundZoom }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.backgroundZoom" type="range" min="100" max="220" step="1" aria-label="光影边框背景放大"><input v-model.number="designOptions.backgroundZoom" class="value-input" type="number" min="100" max="220" step="1" aria-label="光影边框背景放大百分比"></div></div>
+          <div class="range-label"><div class="range-heading"><span>照片边框</span><b>{{ designOptions.lightFrameBorderMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.lightFrameBorderMm" type="range" min="0" max="24" step="0.5" aria-label="光影边框照片边框"><input v-model.number="designOptions.lightFrameBorderMm" class="value-input" type="number" min="0" max="24" step="0.5" aria-label="光影边框照片边框毫米"></div></div>
+          <div class="range-label"><div class="range-heading"><span>底栏高度</span><b>{{ designOptions.lightFrameBottomMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.lightFrameBottomMm" type="range" min="4" max="32" step="0.5" aria-label="参数底栏高度"><input v-model.number="designOptions.lightFrameBottomMm" class="value-input" type="number" min="4" max="32" step="0.5" aria-label="参数底栏高度毫米"></div></div>
+          <div class="range-label"><div class="range-heading"><span>阴影柔化</span><b>{{ designOptions.lightFrameShadowSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.lightFrameShadowSizeMm" type="range" min="0" max="20" step="0.5" aria-label="阴影柔化"><input v-model.number="designOptions.lightFrameShadowSizeMm" class="value-input" type="number" min="0" max="20" step="0.5" aria-label="阴影柔化毫米"></div></div>
+          <div class="range-label"><div class="range-heading"><span>阴影 / 底栏深度</span><b>{{ designOptions.lightFrameShadowDepth }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.lightFrameShadowDepth" type="range" min="0" max="100" step="1" aria-label="阴影和底栏深度"><input v-model.number="designOptions.lightFrameShadowDepth" class="value-input" type="number" min="0" max="100" step="1" aria-label="阴影和底栏深度百分比"></div></div>
+          <label class="field-label color-field">阴影 / 底栏颜色<input v-model="designOptions.lightFrameShadowColor" type="color" aria-label="选择阴影和底栏颜色"></label>
+          <p class="adjustment-note">前景照片保持清晰，放大模糊图填满底色；底栏自动读取原片里已有的相机、镜头、参数和时间。缺失的 EXIF 不会补造。效果会用于 PNG 和打印 PDF。</p>
+        </div>
+      </div>
+      <div v-if="!isCollage && !designOptions.lightFrameEnabled" class="control-section">
         <div class="control-title"><h2>照片放大虚化背景</h2><span class="control-hint">单张照片</span></div>
         <label class="toggle-field"><input v-model="designOptions.blurBackground" type="checkbox" :disabled="!imageData"><span>使用照片放大模糊作为底图</span></label>
         <template v-if="designOptions.blurBackground">
@@ -1211,7 +1378,7 @@ async function addToAssets() {
 .controls{position:static;align-self:stretch;height:100%;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:0 16px;scrollbar-width:thin;scrollbar-color:#d6d7cf transparent}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
 .field-label.color-field input[type=color]{width:100%;height:32px;padding:3px;cursor:pointer}.fit-options{display:grid;grid-template-columns:1fr 1fr;gap:6px}.fit-options .preset-chip{height:34px}.rotate-button{margin-top:13px}.toggle-field{display:flex;align-items:center;gap:8px;color:#6f7168;font-size:10px}.toggle-field input{accent-color:#56594e}
-.collage-photo-list{display:grid;gap:6px;margin-top:14px}.collage-photo-row{display:grid;grid-template-columns:18px minmax(0,1fr) 20px 20px 34px;align-items:center;gap:5px;border-bottom:1px solid #f0f0ec;padding:5px 0}.collage-photo-row.selected{background:#f1f2ed;border-radius:5px}.collage-photo-index{color:#9a9b93;font-size:9px;text-align:center}.collage-photo-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#65675e;font-size:9px;border:0;background:transparent;text-align:left;padding:3px 4px;cursor:pointer}.collage-photo-row.selected .collage-photo-name{color:#30312c;font-weight:600}.collage-photo-row .text-button{padding:3px 0}.collage-photo-row .text-button:disabled{opacity:.35}.remove-photo-button{color:#9a6a62!important}.collage-photo-editor{margin-top:16px;padding-top:13px;border-top:1px solid #e8e9e2}.collage-photo-editor h3{font-size:11px;margin:0;font-weight:600}.selected-photo-label{margin:0 0 11px;color:#777970;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.photo-adjustment-list{margin-top:11px;padding-top:10px;border-top:1px solid #efefeb}
+.collage-photo-list{display:grid;gap:6px;margin-top:14px}.collage-photo-row{display:grid;grid-template-columns:18px minmax(0,1fr) 20px 20px 34px;align-items:center;gap:5px;border-bottom:1px solid #f0f0ec;padding:5px 0}.collage-photo-row.selected{background:#f1f2ed;border-radius:5px}.collage-photo-index{color:#9a9b93;font-size:9px;text-align:center}.collage-photo-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#65675e;font-size:9px;border:0;background:transparent;text-align:left;padding:3px 4px;cursor:pointer}.collage-photo-row.selected .collage-photo-name{color:#30312c;font-weight:600}.collage-photo-row .text-button{padding:3px 0}.collage-photo-row .text-button:disabled{opacity:.35}.remove-photo-button{color:#9a6a62!important}.collage-photo-editor{margin-top:16px;padding-top:13px;border-top:1px solid #e8e9e2}.collage-photo-editor h3{font-size:11px;margin:0;font-weight:600}.selected-photo-label{margin:0 0 11px;color:#777970;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.photo-adjustment-list{margin-top:11px;padding-top:10px;border-top:1px solid #efefeb}.light-frame-options{display:grid;gap:8px;margin-top:12px}
 .range-label{display:grid;gap:8px;margin-top:14px}.range-heading{display:flex;justify-content:space-between;align-items:baseline;color:#76786f;font-size:9px}.range-heading label{cursor:pointer}.range-heading b{color:#565850;font-weight:500}.range-inputs{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center}.range-inputs input[type=range]{width:100%;accent-color:#56594e;height:13px}.range-inputs .value-input{width:72px;height:28px;border:1px solid #e5e5df;border-radius:5px;padding:0 5px;color:#4a4b44;background:white;font-size:10px;text-align:right}.range-inputs .value-input:focus{border-color:#a8aa9e;outline:none}
 .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset-chip{height:31px;border:1px solid #e8e8e2;background:white;border-radius:6px;font-size:9px;color:#777970}.preset-chip.selected{border-color:#777a6e;background:#f2f2ee;color:#373930}
 .preset-groups{display:grid;gap:12px}.preset-group{display:grid;gap:6px}.preset-group-title{font-size:9px;color:#96978e}

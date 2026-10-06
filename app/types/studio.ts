@@ -61,6 +61,18 @@ export interface PrintDesignOptions {
   blurBackground: boolean;
   backgroundZoom: number;
   backgroundBlur: number;
+  lightFrameEnabled: boolean;
+  lightFrameRadiusMm: number;
+  lightFrameLogoText: string;
+  lightFrameLogoSizeMm: number;
+  lightFrameMetadataSizeMm: number;
+  lightFrameLogoColor: string;
+  lightFrameBorderMm: number;
+  lightFrameBottomMm: number;
+  lightFrameShadowSizeMm: number;
+  lightFrameShadowDepth: number;
+  lightFrameShadowColor: string;
+  lightFrameShowMetadata: boolean;
   watermarkEnabled: boolean;
   watermarkText: string;
   watermarkIncludeMetadata: boolean;
