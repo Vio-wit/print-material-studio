@@ -2,6 +2,7 @@
 import { PDFDocument } from "pdf-lib";
 import { printTemplates } from "../composables/useTemplates";
 import { useLocalStudio } from "../composables/useLocalStudio";
+import { applyPhotoAdjustments } from "../utils/photo-adjustments";
 import type { EditSettings, StudioWork } from "../types/studio";
 
 const route = useRoute();
@@ -15,30 +16,36 @@ const marginMm = ref(6);
 const busy = ref(false);
 const notice = ref("");
 const cameraInfo = ref("");
-const settings = reactive<EditSettings>({ brightness: 0, contrast: 0, saturation: 0, warmth: 0, preset: "原片" });
+const settings = reactive<EditSettings>({ exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0, preset: "原片" });
 const imageInput = ref<HTMLInputElement | null>(null);
+const previewCanvas = ref<HTMLCanvasElement | null>(null);
+const undoStack = ref<EditSettings[]>([]);
+const redoStack = ref<EditSettings[]>([]);
+const canUndo = computed(() => undoStack.value.length > 0);
+const canRedo = computed(() => redoStack.value.length > 0);
 
 const selectedTemplate = computed(() => printTemplates.find((item) => item.id === templateId.value) || printTemplates[0]!);
 const aspectRatio = computed(() => selectedTemplate.value.widthMm + " / " + selectedTemplate.value.heightMm);
-const imageFilter = computed(() => filterForSettings(settings));
-const imageStyle = computed(() => ({ filter: imageFilter.value }));
 const filters = ["原片", "明亮", "通透", "鲜活", "暖调", "黑白"];
 const outputDpi = 300;
+const previewMaxEdge = 1400;
 const outputWidth = computed(() => Math.round(selectedTemplate.value.widthMm / 25.4 * outputDpi));
 const outputHeight = computed(() => Math.round(selectedTemplate.value.heightMm / 25.4 * outputDpi));
 
 const presetSettings: Record<string, Omit<EditSettings, "preset">> = {
-  "原片": { brightness: 0, contrast: 0, saturation: 0, warmth: 0 },
-  "明亮": { brightness: 8, contrast: 0, saturation: 0, warmth: 0 },
-  "通透": { brightness: 0, contrast: 10, saturation: 0, warmth: 0 },
-  "鲜活": { brightness: 0, contrast: 0, saturation: 18, warmth: 0 },
-  "暖调": { brightness: 0, contrast: 0, saturation: 0, warmth: 15 },
-  "黑白": { brightness: 0, contrast: 0, saturation: -100, warmth: 0 }
+  "原片": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0 },
+  "明亮": { exposure: 0.12, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0 },
+  "通透": { exposure: 0, contrast: 10, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0 },
+  "鲜活": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 18, warmth: 0 },
+  "暖调": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 15 },
+  "黑白": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: -100, vibrance: 0, warmth: 0 }
 };
 
-function filterForSettings(values: Pick<EditSettings, "brightness" | "contrast" | "saturation" | "warmth">) {
-  return "brightness(" + (100 + values.brightness) + "%) contrast(" + (100 + values.contrast) + "%) saturate(" + (100 + values.saturation) + "%) sepia(" + values.warmth + "%)";
-}
+let decodedImage: HTMLImageElement | null = null;
+let decodedImageSource = "";
+let previewFrame = 0;
+let previewRevision = 0;
+let sliderHistoryPending = false;
 
 onMounted(async () => {
   await studio.refresh();
@@ -53,8 +60,67 @@ onMounted(async () => {
     Object.assign(settings, migrateLegacySettings(work.settings));
   }
   window.addEventListener("paste", handlePaste);
+  window.addEventListener("resize", queuePreviewRender);
 });
-onBeforeUnmount(() => window.removeEventListener("paste", handlePaste));
+watch([imageData, templateId, marginMm, settings], queuePreviewRender, { deep: true, flush: "post" });
+onBeforeUnmount(() => {
+  window.removeEventListener("paste", handlePaste);
+  window.removeEventListener("resize", queuePreviewRender);
+  if (previewFrame) cancelAnimationFrame(previewFrame);
+  previewRevision++;
+});
+
+function queuePreviewRender() {
+  if (!import.meta.client) return;
+  if (previewFrame) cancelAnimationFrame(previewFrame);
+  previewFrame = requestAnimationFrame(() => void renderPreview());
+}
+
+async function renderPreview() {
+  const revision = ++previewRevision;
+  await nextTick();
+  const canvas = previewCanvas.value;
+  const source = imageData.value;
+  if (!canvas || !source) return;
+
+  try {
+    if (!decodedImage || decodedImageSource !== source) {
+      const image = new Image();
+      image.src = source;
+      await image.decode();
+      if (revision !== previewRevision) return;
+      decodedImage = image;
+      decodedImageSource = source;
+    }
+    if (revision === previewRevision && decodedImage) drawPhoto(canvas, decodedImage, previewMaxEdge);
+  } catch {
+    notice.value = "照片预览处理失败；可以重新导入这张照片再试。";
+  }
+}
+
+function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: number) {
+  const scale = Math.min(1, maxEdge / Math.max(outputWidth.value, outputHeight.value));
+  canvas.width = Math.max(1, Math.round(outputWidth.value * scale));
+  canvas.height = Math.max(1, Math.round(outputHeight.value * scale));
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("无法创建照片预览画布");
+
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  const dpi = canvas.width / (selectedTemplate.value.widthMm / 25.4);
+  const inset = Math.round(marginMm.value / 25.4 * dpi);
+  const maxWidth = Math.max(1, canvas.width - inset * 2);
+  const maxHeight = Math.max(1, canvas.height - inset * 2);
+  const imageScale = Math.min(maxWidth / image.naturalWidth, maxHeight / image.naturalHeight);
+  const width = Math.max(1, Math.round(image.naturalWidth * imageScale));
+  const height = Math.max(1, Math.round(image.naturalHeight * imageScale));
+  const x = Math.round((canvas.width - width) / 2);
+  const y = Math.round((canvas.height - height) / 2);
+  context.drawImage(image, x, y, width, height);
+  const pixels = context.getImageData(x, y, width, height);
+  applyPhotoAdjustments(pixels.data, settings);
+  context.putImageData(pixels, x, y);
+}
 
 function setImage(file: File) {
   if (!["image/jpeg", "image/png", "image/webp"].includes(file.type.toLowerCase())) {
@@ -104,28 +170,83 @@ function handlePaste(event: ClipboardEvent) {
   }
 }
 
-function migrateLegacySettings(saved: EditSettings): EditSettings {
-  const restored = { ...saved };
-  if (restored.preset === "明亮") restored.brightness += 8;
-  if (restored.preset === "通透") restored.contrast += 10;
-  if (restored.preset === "鲜活") restored.saturation += 18;
-  if (restored.preset === "暖调") restored.warmth += 15;
-  if (restored.preset === "黑白") restored.saturation = -100;
-  return restored;
+function migrateLegacySettings(saved: Partial<EditSettings> & { brightness?: number }): EditSettings {
+  const preset = saved.preset || "原片";
+  let brightness = saved.brightness || 0;
+  let contrast = saved.contrast || 0;
+  let saturation = saved.saturation || 0;
+  let warmth = saved.warmth || 0;
+  const isLegacyHiddenPreset = typeof saved.exposure !== "number"
+    && preset !== "原片"
+    && brightness === 0
+    && contrast === 0
+    && saturation === 0
+    && warmth === 0;
+  if (isLegacyHiddenPreset) {
+    if (preset === "明亮") brightness = 8;
+    if (preset === "通透") contrast = 10;
+    if (preset === "鲜活") saturation = 18;
+    if (preset === "暖调") warmth = 15;
+    if (preset === "黑白") saturation = -100;
+  }
+
+  return {
+    exposure: saved.exposure ?? Math.log2(Math.max(0.01, 1 + brightness / 100)),
+    contrast,
+    highlights: saved.highlights || 0,
+    shadows: saved.shadows || 0,
+    temperature: saved.temperature || 0,
+    tint: saved.tint || 0,
+    saturation,
+    vibrance: saved.vibrance || 0,
+    warmth,
+    preset
+  };
+}
+
+function rememberSettings() {
+  undoStack.value = [...undoStack.value.slice(-39), { ...settings }];
+  redoStack.value = [];
+}
+
+function beginSliderHistory() {
+  if (sliderHistoryPending) return;
+  rememberSettings();
+  sliderHistoryPending = true;
+}
+
+function endSliderHistory() {
+  sliderHistoryPending = false;
+}
+
+function undoSettings() {
+  const previous = undoStack.value.at(-1);
+  if (!previous) return;
+  undoStack.value = undoStack.value.slice(0, -1);
+  redoStack.value = [...redoStack.value, { ...settings }];
+  sliderHistoryPending = false;
+  Object.assign(settings, previous);
+}
+
+function redoSettings() {
+  const next = redoStack.value.at(-1);
+  if (!next) return;
+  redoStack.value = redoStack.value.slice(0, -1);
+  undoStack.value = [...undoStack.value, { ...settings }];
+  sliderHistoryPending = false;
+  Object.assign(settings, next);
 }
 
 function applyPreset(preset: string) {
   const values = presetSettings[preset];
   if (!values) return;
+  if (JSON.stringify(settings) === JSON.stringify({ ...values, preset })) return;
+  rememberSettings();
   Object.assign(settings, values, { preset });
 }
 
 function resetSettings() {
-  settings.brightness = 0;
-  settings.contrast = 0;
-  settings.saturation = 0;
-  settings.warmth = 0;
-  settings.preset = "原片";
+  applyPreset("原片");
 }
 
 async function createExportCanvas(): Promise<HTMLCanvasElement> {
@@ -133,7 +254,7 @@ async function createExportCanvas(): Promise<HTMLCanvasElement> {
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(selectedTemplate.value.widthMm / 25.4 * dpi);
   canvas.height = Math.round(selectedTemplate.value.heightMm / 25.4 * dpi);
-  const context = canvas.getContext("2d");
+  const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("无法创建图片画布");
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, canvas.width, canvas.height);
@@ -145,12 +266,14 @@ async function createExportCanvas(): Promise<HTMLCanvasElement> {
   const maxWidth = canvas.width - inset * 2;
   const maxHeight = canvas.height - inset * 2;
   const scale = Math.min(maxWidth / image.naturalWidth, maxHeight / image.naturalHeight);
-  const width = image.naturalWidth * scale;
-  const height = image.naturalHeight * scale;
-  context.save();
-  context.filter = imageFilter.value;
-  context.drawImage(image, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-  context.restore();
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const x = Math.round((canvas.width - width) / 2);
+  const y = Math.round((canvas.height - height) / 2);
+  context.drawImage(image, x, y, width, height);
+  const pixels = context.getImageData(x, y, width, height);
+  applyPhotoAdjustments(pixels.data, settings);
+  context.putImageData(pixels, x, y);
   return canvas;
 }
 
@@ -286,9 +409,12 @@ const workId = ref("");
 function formatSetting(key: string) {
   const value = settings[key as keyof EditSettings];
   if (typeof value !== "number") return "";
-  if (key === "warmth") return value + "% 棕褐叠加";
-  const adjustment = (value > 0 ? "+" : "") + value + "%";
-  return adjustment + " → " + (100 + value) + "%";
+  const sign = value > 0 ? "+" : "";
+  if (key === "exposure") return sign + value.toFixed(1) + " EV";
+  if (key === "warmth") return value + "%";
+  if (key === "temperature") return sign + value + " 冷暖";
+  if (key === "tint") return sign + value + " 绿/洋红";
+  return sign + value;
 }
 
 async function addToAssets() {
@@ -320,8 +446,8 @@ async function addToAssets() {
       <div v-else class="preview-wrap">
         <div class="preview-toolbar"><span><b>画布预览</b><small>{{ selectedTemplate.name }} · 白色纸张</small></span><button class="button small" @click="imageInput?.click()">换一张</button><input ref="imageInput" type="file" accept="image/*" hidden @change="onChoose"></div>
         <div class="canvas-stage">
-          <div class="print-canvas" :style="{ aspectRatio, padding: marginMm / 2 + '%' }">
-            <img :src="imageData" :style="imageStyle" alt="照片预览">
+          <div class="print-canvas" :style="{ aspectRatio }">
+            <canvas ref="previewCanvas" class="photo-preview-canvas" role="img" aria-label="照片预览"></canvas>
           </div>
         </div>
         <div class="preview-foot"><span>原图完整保留比例，画布内自动留白</span><span>{{ cameraInfo || fileName }}</span></div>
@@ -345,14 +471,19 @@ async function addToAssets() {
         <div v-if="settings.preset === '自定义'" class="preset-custom" role="status">自定义 · 参数已按下面滑杆显示</div>
         <p class="adjustment-note">预设是本应用的通用近似效果，不是尼康、佳能或索尼的官方滤镜。</p>
       </div>
-      <div class="control-section"><div class="control-title"><h2>手动调整</h2><span class="control-hint">效果可撤回</span></div>
+      <div class="control-section"><div class="control-title"><h2>手动调整</h2><div class="history-actions"><button class="text-button" :disabled="!canUndo" @click="undoSettings">↶ 撤销</button><button class="text-button" :disabled="!canRedo" @click="redoSettings">↷ 重做</button></div></div>
         <label v-for="item in [
-          { key: 'brightness', name: '亮度' },
+          { key: 'exposure', name: '曝光' },
           { key: 'contrast', name: '对比度' },
+          { key: 'highlights', name: '高光' },
+          { key: 'shadows', name: '阴影' },
+          { key: 'temperature', name: '冷暖' },
+          { key: 'tint', name: '绿 ↔ 洋红' },
           { key: 'saturation', name: '鲜艳度' },
+          { key: 'vibrance', name: '自然饱和度' },
           { key: 'warmth', name: '暖色叠加' }
-        ]" :key="item.key" class="range-label"><span>{{ item.name }} <b>{{ formatSetting(item.key) }}</b></span><input v-model.number="settings[item.key as keyof EditSettings]" type="range" :min="item.key === 'saturation' ? -100 : item.key === 'warmth' ? 0 : -50" max="50" step="1" @input="settings.preset = '自定义'"></label>
-        <p class="adjustment-note">数值显示“调整量 → 实际滤镜值”；暖色是棕褐叠加强度，不是曝光 EV 或相机色温。</p>
+        ]" :key="item.key" class="range-label"><span>{{ item.name }} <b>{{ formatSetting(item.key) }}</b></span><input v-model.number="settings[item.key as keyof EditSettings]" type="range" :min="item.key === 'exposure' ? -3 : item.key === 'warmth' ? 0 : item.key === 'contrast' ? -50 : -100" :max="item.key === 'exposure' ? 3 : item.key === 'warmth' ? 50 : item.key === 'contrast' ? 50 : 100" :step="item.key === 'exposure' ? 0.1 : 1" @pointerdown="beginSliderHistory" @pointerup="endSliderHistory" @pointercancel="endSliderHistory" @keydown="beginSliderHistory" @change="endSliderHistory" @input="settings.preset = '自定义'"></label>
+        <p class="adjustment-note">曝光按 EV 调整；其他值是本工具的相对强度，不等同于 Lightroom 的标尺。冷暖与色调为视觉近似，并非 Kelvin 白平衡。</p>
       </div>
       <div class="privacy-note"><span>◉</span><p><b>你的照片留在本机</b><br>作品保存到当前浏览器，不会自动上传。请定期导出备份。</p></div>
     </aside>
@@ -363,9 +494,9 @@ async function addToAssets() {
 .editor-heading{display:flex;justify-content:space-between;align-items:end;gap:20px}.heading-actions{display:flex;gap:8px}
 .workflow{display:flex;align-items:center;gap:9px;padding:17px 0 20px;color:#b0b1aa;font-size:10px}.workflow span{white-space:nowrap}.workflow b{display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid #dedfd8;border-radius:50%;font-size:9px;margin-right:5px;font-weight:500}.workflow .current{color:#4e5148}.workflow .current b{background:#30312c;color:white;border-color:#30312c}.workflow i{height:1px;background:#e5e6df;width:34px}.workflow-skip{margin-left:auto;color:#9c9e95}
 .editor-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:start}.preview-column{min-width:0}.upload-zone{min-height:490px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-style:dashed;background:#fbfbf9;cursor:pointer}.upload-mark{display:grid;place-items:center;width:54px;height:54px;border-radius:18px;background:#efefe9;font-size:24px;color:#686a60}.upload-zone h2{font-size:17px;margin:18px 0 6px}.upload-zone p{font-size:11px;color:#92948b;margin:0 0 18px}.paste-hint{margin-top:14px;color:#7f8178;font-size:10px}.upload-zone small{margin-top:20px;color:#b0b1aa;font-size:9px}
-.preview-wrap{background:#f0f0eb;border:1px solid #e6e6df;border-radius:11px;overflow:hidden}.preview-toolbar{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:#fff}.preview-toolbar span{display:grid;gap:4px}.preview-toolbar b{font-size:11px}.preview-toolbar small{font-size:9px;color:#9a9b93}.canvas-stage{min-height:430px;display:grid;place-items:center;padding:35px;background:#eeeee9}.print-canvas{width:min(74%,410px);max-height:500px;background:white;box-shadow:none;display:flex;align-items:center;justify-content:center;overflow:hidden}.print-canvas img{width:100%;height:100%;object-fit:contain}.preview-foot{background:#fff;padding:10px 13px;display:flex;justify-content:space-between;font-size:9px;color:#96978f}
+.preview-wrap{background:#f0f0eb;border:1px solid #e6e6df;border-radius:11px;overflow:hidden}.preview-toolbar{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:#fff}.preview-toolbar span{display:grid;gap:4px}.preview-toolbar b{font-size:11px}.preview-toolbar small{font-size:9px;color:#9a9b93}.canvas-stage{min-height:430px;display:grid;place-items:center;padding:35px;background:#eeeee9}.print-canvas{width:min(74%,410px);max-height:500px;background:white;box-shadow:none;display:flex;align-items:center;justify-content:center;overflow:hidden}.photo-preview-canvas{display:block;width:100%;height:100%;object-fit:contain}.preview-foot{background:#fff;padding:10px 13px;display:flex;justify-content:space-between;font-size:9px;color:#96978f}
 .export-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.export-row>span{font-size:9px;color:#96978e;margin-left:auto}.export-spec{margin-top:7px;color:#72746c;font-size:9px}.notice{margin-top:10px;background:#edf1e9;border:1px solid #e1e8db;padding:10px 12px;border-radius:7px;color:#5f7059;font-size:10px}
-.controls{padding:0 16px}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.control-hint{font-size:9px;color:#a1a29b}
+.controls{padding:0 16px}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
 .range-label{display:grid;gap:8px;margin-top:14px}.range-label span{display:flex;justify-content:space-between;color:#76786f;font-size:9px}.range-label b{color:#565850;font-weight:500}.range-label input{width:100%;accent-color:#56594e;height:13px}
 .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset-chip{height:31px;border:1px solid #e8e8e2;background:white;border-radius:6px;font-size:9px;color:#777970}.preset-chip.selected{border-color:#777a6e;background:#f2f2ee;color:#373930}

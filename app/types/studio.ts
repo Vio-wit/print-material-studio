@@ -1,7 +1,12 @@
 export interface EditSettings {
-  brightness: number;
+  exposure: number;
   contrast: number;
+  highlights: number;
+  shadows: number;
+  temperature: number;
+  tint: number;
   saturation: number;
+  vibrance: number;
   warmth: number;
   preset: string;
 }
