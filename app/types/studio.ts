@@ -32,6 +32,14 @@ export interface PhotoMetadata {
   focalLength: string;
 }
 
+export interface CollagePhoto {
+  id: string;
+  fileName: string;
+  imageData: string;
+  byteSize?: number;
+  photoMetadata?: PhotoMetadata;
+}
+
 export interface PrintDesignOptions {
   fitMode: "contain" | "cover";
   zoomPercent: number;
@@ -50,6 +58,10 @@ export interface PrintDesignOptions {
   watermarkOpacity: number;
   watermarkColor: string;
   watermarkPosition: "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
+  collageLayout: "grid" | "masonry";
+  collageColumns: number;
+  collageGapMm: number;
+  pageOrientation: "portrait" | "landscape";
 }
 
 export interface StudioWork {
@@ -60,6 +72,7 @@ export interface StudioWork {
   settings: EditSettings;
   designOptions?: Partial<PrintDesignOptions>;
   photoMetadata?: PhotoMetadata;
+  additionalPhotos?: CollagePhoto[];
   subjectSelection?: "person" | "inverse-person";
   updatedAt: string;
 }

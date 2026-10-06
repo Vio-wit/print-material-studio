@@ -3,8 +3,9 @@ import { PDFDocument } from "pdf-lib";
 import { printTemplates } from "../composables/useTemplates";
 import { useLocalStudio } from "../composables/useLocalStudio";
 import { applyPhotoAdjustments } from "../utils/photo-adjustments";
+import { computeCollageLayout, suggestCollageColumns } from "../utils/collage-layout";
 import { segmentPerson } from "../utils/person-segmentation";
-import type { EditSettings, PhotoMetadata, PrintDesignOptions, StudioWork, SubjectMask } from "../types/studio";
+import type { CollagePhoto, EditSettings, PhotoMetadata, PrintDesignOptions, StudioWork, SubjectMask } from "../types/studio";
 
 const route = useRoute();
 const studio = useLocalStudio();
@@ -17,7 +18,8 @@ const defaultDesignOptions: PrintDesignOptions = {
   fitMode: "contain", zoomPercent: 100, offsetX: 0, offsetY: 0, rotation: 0,
   frameMm: 6, paperColor: "#ffffff", blurBackground: false, backgroundZoom: 125, backgroundBlur: 18,
   watermarkEnabled: false, watermarkText: "", watermarkIncludeMetadata: false,
-  watermarkFontSizeMm: 3, watermarkOpacity: 80, watermarkColor: "#ffffff", watermarkPosition: "bottom-right"
+  watermarkFontSizeMm: 3, watermarkOpacity: 80, watermarkColor: "#ffffff", watermarkPosition: "bottom-right",
+  collageLayout: "grid", collageColumns: 5, collageGapMm: 3, pageOrientation: "portrait"
 };
 const designOptions = reactive<PrintDesignOptions>({ ...defaultDesignOptions });
 const busy = ref(false);
@@ -26,7 +28,11 @@ const cameraInfo = ref("");
 const photoMetadata = shallowRef<PhotoMetadata | null>(null);
 const settings = reactive<EditSettings>({ exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0, subjectExposure: 0, subjectContrast: 0, preset: "原片" });
 const imageInput = ref<HTMLInputElement | null>(null);
+const collageInput = ref<HTMLInputElement | null>(null);
 const previewCanvas = ref<HTMLCanvasElement | null>(null);
+const collagePhotos = shallowRef<CollagePhoto[]>([]);
+const loadingCollage = ref(false);
+const collageColumnsCustomized = ref(false);
 const subjectMask = shallowRef<SubjectMask | null>(null);
 const selectionInverted = ref(false);
 const selectingSubject = ref(false);
@@ -61,15 +67,19 @@ const subjectAdjustmentControls: AdjustmentControl[] = [
 ];
 
 const selectedTemplate = computed(() => printTemplates.find((item) => item.id === templateId.value) || printTemplates[0]!);
-const aspectRatio = computed(() => selectedTemplate.value.widthMm + " / " + selectedTemplate.value.heightMm);
+const pageWidthMm = computed(() => designOptions.pageOrientation === "landscape" ? Math.max(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm) : Math.min(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm));
+const pageHeightMm = computed(() => designOptions.pageOrientation === "landscape" ? Math.min(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm) : Math.max(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm));
+const aspectRatio = computed(() => pageWidthMm.value + " / " + pageHeightMm.value);
+const isCollage = computed(() => collagePhotos.value.length > 1);
+const paperColorLabel = computed(() => designOptions.paperColor.toLowerCase() === "#ffffff" ? "白色纸张" : "自定义底色");
 const basicFilters = ["原片", "明亮", "通透", "鲜活", "暖调", "黑白"];
 const moodFilters = ["暖胶片", "褪色复古", "冷调电影", "柔和人像", "日系清透"];
 const outputDpi = 300;
 const previewMaxEdge = 1400;
 const adjustingPreviewMaxEdge = 720;
 const isAdjustingPreview = ref(false);
-const outputWidth = computed(() => Math.round(selectedTemplate.value.widthMm / 25.4 * outputDpi));
-const outputHeight = computed(() => Math.round(selectedTemplate.value.heightMm / 25.4 * outputDpi));
+const outputWidth = computed(() => Math.round(pageWidthMm.value / 25.4 * outputDpi));
+const outputHeight = computed(() => Math.round(pageHeightMm.value / 25.4 * outputDpi));
 
 const presetSettings: Record<string, Omit<EditSettings, "preset">> = {
   "原片": { exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0, subjectExposure: 0, subjectContrast: 0 },
@@ -87,6 +97,7 @@ const presetSettings: Record<string, Omit<EditSettings, "preset">> = {
 
 let decodedImage: HTMLImageElement | null = null;
 let decodedImageSource = "";
+const collagePreviewCache = new Map<string, HTMLCanvasElement>();
 let previewFrame = 0;
 let previewRevision = 0;
 let sliderHistoryPending = false;
@@ -98,6 +109,14 @@ onMounted(async () => {
   const work = studio.works.value.find((item) => item.id === queryWorkId);
   if (work) {
     workId.value = work.id;
+    collageColumnsCustomized.value = Boolean(work.additionalPhotos?.length);
+    const primaryPhoto: CollagePhoto = {
+      id: "primary-" + work.id,
+      fileName: work.title,
+      imageData: work.imageData,
+      ...(work.photoMetadata ? { photoMetadata: work.photoMetadata } : {})
+    };
+    collagePhotos.value = [primaryPhoto, ...(work.additionalPhotos || [])];
     imageData.value = work.imageData;
     fileName.value = work.title;
     title.value = work.title;
@@ -114,7 +133,7 @@ onMounted(async () => {
   window.addEventListener("paste", handlePaste);
   window.addEventListener("resize", queuePreviewRender);
 });
-watch([imageData, templateId, settings, designOptions, photoMetadata], queuePreviewRender, { deep: true, flush: "post" });
+watch([imageData, templateId, settings, designOptions, photoMetadata, collagePhotos], queuePreviewRender, { deep: true, flush: "post" });
 onBeforeUnmount(() => {
   window.removeEventListener("paste", handlePaste);
   window.removeEventListener("resize", queuePreviewRender);
@@ -137,9 +156,14 @@ async function renderPreview() {
   if (!canvas || !source) return;
 
   try {
-    const image = await loadPhotoImage(source);
     const maxEdge = isAdjustingPreview.value ? adjustingPreviewMaxEdge : previewMaxEdge;
-    if (revision === previewRevision) drawPhoto(canvas, image, maxEdge, subjectMask.value, selectionInverted.value, true);
+    if (revision === previewRevision) {
+      if (isCollage.value) await drawCollage(canvas, maxEdge, false, revision);
+      else {
+        const image = await loadPhotoImage(source);
+        if (revision === previewRevision) drawPhoto(canvas, image, maxEdge, subjectMask.value, selectionInverted.value, true);
+      }
+    }
   } catch {
     notice.value = "照片预览处理失败；可以重新导入这张照片再试。";
   }
@@ -164,7 +188,7 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
 
   context.fillStyle = designOptions.paperColor;
   context.fillRect(0, 0, canvas.width, canvas.height);
-  const dpi = canvas.width / (selectedTemplate.value.widthMm / 25.4);
+  const dpi = canvas.width / (pageWidthMm.value / 25.4);
   const inset = Math.round(designOptions.frameMm / 25.4 * dpi);
   const maxWidth = Math.max(1, canvas.width - inset * 2);
   const maxHeight = Math.max(1, canvas.height - inset * 2);
@@ -224,7 +248,7 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
 
 function drawWatermark(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement) {
   const metadata = photoMetadata.value;
-  const metadataLine = metadata && designOptions.watermarkIncludeMetadata
+  const metadataLine = metadata && !isCollage.value && designOptions.watermarkIncludeMetadata
     ? [
         [metadata.make, metadata.camera].filter(Boolean).join(" "), metadata.lens,
         metadata.focalLength ? metadata.focalLength + " mm" : "",
@@ -235,7 +259,7 @@ function drawWatermark(context: CanvasRenderingContext2D, canvas: HTMLCanvasElem
   const watermark = [designOptions.watermarkText.trim(), metadataLine].filter(Boolean).join(" · ");
   if (!watermark) return;
 
-  const dpi = canvas.width / (selectedTemplate.value.widthMm / 25.4);
+  const dpi = canvas.width / (pageWidthMm.value / 25.4);
   const fontSize = Math.max(1, Math.min(18, designOptions.watermarkFontSizeMm) / 25.4 * dpi);
   const margin = Math.max(1, 3 / 25.4 * dpi);
   const maxWidth = Math.max(1, canvas.width - margin * 2);
@@ -273,6 +297,111 @@ function drawWatermark(context: CanvasRenderingContext2D, canvas: HTMLCanvasElem
   context.restore();
 }
 
+async function getCollagePreview(photo: CollagePhoto) {
+  const cached = collagePreviewCache.get(photo.id);
+  if (cached) return cached;
+  const image = await loadPhotoImage(photo.imageData);
+  const scale = Math.min(1, 640 / Math.max(image.naturalWidth, image.naturalHeight));
+  const thumbnail = document.createElement("canvas");
+  thumbnail.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  thumbnail.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = thumbnail.getContext("2d");
+  if (!context) throw new Error("无法创建拼贴预览缩略图");
+  context.drawImage(image, 0, 0, thumbnail.width, thumbnail.height);
+  collagePreviewCache.set(photo.id, thumbnail);
+  releaseDecodedImage(image);
+  return thumbnail;
+}
+
+async function drawCollage(canvas: HTMLCanvasElement, maxEdge: number, useOriginals: boolean, expectedRevision?: number) {
+  const scale = Math.min(1, maxEdge / Math.max(outputWidth.value, outputHeight.value));
+  canvas.width = Math.max(1, Math.round(outputWidth.value * scale));
+  canvas.height = Math.max(1, Math.round(outputHeight.value * scale));
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("无法创建拼贴画布");
+  context.fillStyle = designOptions.paperColor;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const dpi = canvas.width / (pageWidthMm.value / 25.4);
+  const inset = Math.round(designOptions.frameMm / 25.4 * dpi);
+  const areaWidth = Math.max(1, canvas.width - inset * 2);
+  const areaHeight = Math.max(1, canvas.height - inset * 2);
+  const gap = Math.max(0, designOptions.collageGapMm / 25.4 * dpi);
+  const aspects: number[] = [];
+
+  for (const photo of collagePhotos.value) {
+    if (useOriginals && photo.photoMetadata?.width && photo.photoMetadata.height) {
+      aspects.push(photo.photoMetadata.width / photo.photoMetadata.height);
+    } else {
+      const preview = await getCollagePreview(photo);
+      if (expectedRevision !== undefined && expectedRevision !== previewRevision) return;
+      aspects.push(preview.width / Math.max(1, preview.height));
+    }
+  }
+
+  const layout = computeCollageLayout(aspects, {
+    width: areaWidth,
+    height: areaHeight,
+    columns: designOptions.collageColumns,
+    gap,
+    mode: designOptions.collageLayout
+  });
+  for (const item of layout) {
+    if (expectedRevision !== undefined && expectedRevision !== previewRevision) return;
+    const photo = collagePhotos.value[item.index]!;
+    const source = useOriginals ? await loadPhotoImage(photo.imageData) : await getCollagePreview(photo);
+    if (expectedRevision !== undefined && expectedRevision !== previewRevision) return;
+    const sourceWidth = source instanceof HTMLImageElement ? source.naturalWidth : source.width;
+    const sourceHeight = source instanceof HTMLImageElement ? source.naturalHeight : source.height;
+    const photoScale = Math.min(item.width / sourceWidth, item.height / sourceHeight);
+    const width = Math.max(1, Math.round(sourceWidth * photoScale));
+    const height = Math.max(1, Math.round(sourceHeight * photoScale));
+    const layer = document.createElement("canvas");
+    layer.width = width;
+    layer.height = height;
+    const layerContext = layer.getContext("2d", { willReadFrequently: true });
+    if (!layerContext) throw new Error("无法创建拼贴图层");
+    layerContext.drawImage(source, 0, 0, width, height);
+    const pixels = layerContext.getImageData(0, 0, width, height);
+    applyPhotoAdjustments(pixels.data, width, height, settings, null, false);
+    layerContext.putImageData(pixels, 0, 0);
+    context.drawImage(layer, inset + item.x + (item.width - width) / 2, inset + item.y + (item.height - height) / 2);
+    if (useOriginals) releaseDecodedImage(source as HTMLImageElement);
+  }
+
+  if (designOptions.watermarkEnabled) drawWatermark(context, canvas);
+}
+
+function releaseDecodedImage(image: HTMLImageElement) {
+  if (decodedImage !== image) return;
+  image.onload = null;
+  image.onerror = null;
+  image.src = "";
+  decodedImage = null;
+  decodedImageSource = "";
+}
+
+function clearCollagePreviewCache() {
+  collagePreviewCache.clear();
+}
+
+function suggestColumnsForPhotos(photos = collagePhotos.value) {
+  const aspects = photos.map((photo) => {
+    const metadata = photo.photoMetadata;
+    return metadata?.width && metadata.height ? metadata.width / metadata.height : 1.5;
+  });
+  designOptions.collageColumns = suggestCollageColumns(aspects, pageWidthMm.value, pageHeightMm.value);
+}
+
+function markCollageColumnsCustomized() {
+  collageColumnsCustomized.value = true;
+}
+
+function onPageOrientationChange(event: Event) {
+  designOptions.pageOrientation = (event.currentTarget as HTMLSelectElement).value as PrintDesignOptions["pageOrientation"];
+  if (isCollage.value && !collageColumnsCustomized.value) suggestColumnsForPhotos();
+}
+
 function createSelectionOverlay(mask: SubjectMask, inverted: boolean) {
   const overlay = document.createElement("canvas");
   overlay.width = mask.width;
@@ -305,6 +434,10 @@ function setImage(file: File) {
   reader.onload = () => {
     const loadedData = String(reader.result || "");
     imageData.value = loadedData;
+    const photoId = globalThis.crypto?.randomUUID?.() || Date.now().toString();
+    collagePhotos.value = [{ id: photoId, fileName: file.name, imageData: loadedData, byteSize: file.size }];
+    clearCollagePreviewCache();
+    workId.value = "";
     subjectMask.value = null;
     selectionInverted.value = false;
     photoMetadata.value = null;
@@ -317,6 +450,7 @@ function setImage(file: File) {
     inspectImage(file).then((info) => {
       if (imageData.value !== loadedData) return;
       photoMetadata.value = info;
+      collagePhotos.value = collagePhotos.value.map((photo) => photo.id === photoId ? { ...photo, photoMetadata: info } : photo);
       const fields = [info.make, info.camera, info.lens].filter(Boolean);
       cameraInfo.value = fields.join(" · ") || (info.width + " × " + info.height + " px");
     }).catch(() => {
@@ -329,6 +463,118 @@ function setImage(file: File) {
 function onChoose(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0];
   if (file) setImage(file);
+  (event.target as HTMLInputElement).value = "";
+}
+
+function openCollageInput() {
+  collageInput.value?.click();
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("无法读取文件：" + file.name));
+    reader.readAsDataURL(file);
+  });
+}
+
+function estimatePhotoSize(photo: CollagePhoto) {
+  if (photo.byteSize) return photo.byteSize;
+  const encoded = photo.imageData.split(",", 2)[1] || "";
+  return Math.floor(encoded.length * 3 / 4);
+}
+
+async function onCollageChoose(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const selected = Array.from(input.files || []);
+  input.value = "";
+  if (selected.length === 0) return;
+  const basePhotos = isCollage.value ? [...collagePhotos.value] : [];
+  const allPhotosCount = basePhotos.length + selected.length;
+  if (allPhotosCount < 2 || allPhotosCount > 15) {
+    notice.value = "拼贴请保留 2–15 张照片；单张模式请用“选择照片”。";
+    return;
+  }
+  const unsupported = selected.find((file) => !["image/jpeg", "image/png", "image/webp"].includes(file.type.toLowerCase()));
+  if (unsupported) {
+    notice.value = "“" + unsupported.name + "”不是支持的 JPEG、PNG 或 WebP 图片。";
+    return;
+  }
+  const tooLarge = selected.find((file) => file.size > 30 * 1024 * 1024);
+  if (tooLarge) {
+    notice.value = "单张照片不能超过 30 MB：" + tooLarge.name;
+    return;
+  }
+  const combinedSize = basePhotos.reduce((total, photo) => total + estimatePhotoSize(photo), 0) + selected.reduce((total, file) => total + file.size, 0);
+  if (combinedSize > 120 * 1024 * 1024) {
+    notice.value = "这批照片总量超过 120 MB；为避免本机浏览器内存或存储压力，请减少照片或先缩小文件。";
+    return;
+  }
+
+  loadingCollage.value = true;
+  notice.value = "正在本机读取照片并准备拼贴预览……";
+  try {
+    const addedPhotos: CollagePhoto[] = [];
+    for (const file of selected) {
+      const [data, metadata] = await Promise.all([readFileAsDataUrl(file), inspectImage(file)]);
+      addedPhotos.push({
+        id: globalThis.crypto?.randomUUID?.() || Date.now().toString() + "-" + addedPhotos.length,
+        fileName: file.name,
+        imageData: data,
+        byteSize: file.size,
+        photoMetadata: metadata
+      });
+    }
+    const allPhotos = [...basePhotos, ...addedPhotos];
+    if (basePhotos.length === 0) collageColumnsCustomized.value = false;
+    collagePhotos.value = allPhotos;
+    if (!collageColumnsCustomized.value) suggestColumnsForPhotos(allPhotos);
+    clearCollagePreviewCache();
+    imageData.value = allPhotos[0]!.imageData;
+    photoMetadata.value = allPhotos[0]!.photoMetadata || null;
+    fileName.value = allPhotos[0]!.fileName;
+    title.value = basePhotos.length > 0 ? title.value : "多照片拼贴";
+    if (basePhotos.length === 0) workId.value = "";
+    subjectMask.value = null;
+    selectionInverted.value = false;
+    settings.subjectExposure = 0;
+    settings.subjectContrast = 0;
+    cameraInfo.value = [photoMetadata.value?.make, photoMetadata.value?.camera, photoMetadata.value?.lens].filter(Boolean).join(" · ");
+    notice.value = "已载入 " + allPhotos.length + " 张照片；拼贴保持原图比例，可继续调整布局后导出。";
+  } catch (error) {
+    notice.value = "拼贴照片读取失败：" + (error instanceof Error ? error.message : "请检查文件后重试。");
+  } finally {
+    loadingCollage.value = false;
+  }
+}
+
+function removeCollagePhoto(index: number) {
+  if (collagePhotos.value.length <= 1) return;
+  const remaining = collagePhotos.value.filter((_, photoIndex) => photoIndex !== index);
+  collagePhotos.value = remaining;
+  clearCollagePreviewCache();
+  imageData.value = remaining[0]!.imageData;
+  photoMetadata.value = remaining[0]!.photoMetadata || null;
+  fileName.value = remaining[0]!.fileName;
+  cameraInfo.value = [photoMetadata.value?.make, photoMetadata.value?.camera, photoMetadata.value?.lens].filter(Boolean).join(" · ");
+  subjectMask.value = null;
+  selectionInverted.value = false;
+  notice.value = remaining.length > 1 ? "已移除照片；拼贴已重新排版。" : "拼贴已变为单张照片。";
+}
+
+function moveCollagePhoto(index: number, direction: -1 | 1) {
+  const target = index + direction;
+  if (target < 0 || target >= collagePhotos.value.length) return;
+  const reordered = [...collagePhotos.value];
+  [reordered[index], reordered[target]] = [reordered[target]!, reordered[index]!];
+  collagePhotos.value = reordered;
+  imageData.value = reordered[0]!.imageData;
+  photoMetadata.value = reordered[0]!.photoMetadata || null;
+  fileName.value = reordered[0]!.fileName;
+  cameraInfo.value = [photoMetadata.value?.make, photoMetadata.value?.camera, photoMetadata.value?.lens].filter(Boolean).join(" · ");
+  clearCollagePreviewCache();
+  notice.value = "照片顺序已更新。";
 }
 
 function onDrop(event: DragEvent) {
@@ -519,6 +765,10 @@ function resetSettings() {
 async function createExportCanvas(): Promise<HTMLCanvasElement> {
   const canvas = document.createElement("canvas");
   if (!imageData.value) throw new Error("请先导入照片");
+  if (isCollage.value) {
+    await drawCollage(canvas, Math.max(outputWidth.value, outputHeight.value), true);
+    return canvas;
+  }
   const image = new Image();
   image.src = imageData.value;
   await image.decode();
@@ -555,8 +805,8 @@ async function exportPdf() {
     const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("PDF 图片准备失败")), "image/png"));
     const bytes = await png.arrayBuffer();
     const document = await PDFDocument.create();
-    const pageWidth = selectedTemplate.value.widthMm / 25.4 * 72;
-    const pageHeight = selectedTemplate.value.heightMm / 25.4 * 72;
+    const pageWidth = pageWidthMm.value / 25.4 * 72;
+    const pageHeight = pageHeightMm.value / 25.4 * 72;
     const page = document.addPage([pageWidth, pageHeight]);
     const embedded = await document.embedPng(bytes);
     page.drawImage(embedded, { x: 0, y: 0, width: pageWidth, height: pageHeight });
@@ -643,6 +893,7 @@ async function saveToWorks() {
       settings: { ...settings },
       designOptions: { ...designOptions },
       ...(photoMetadata.value ? { photoMetadata: { ...photoMetadata.value } } : {}),
+      ...(isCollage.value ? { additionalPhotos: collagePhotos.value.slice(1) } : {}),
       ...(subjectMask.value ? { subjectSelection: selectionInverted.value ? "inverse-person" as const : "person" as const } : {}),
       updatedAt: new Date().toISOString()
     };
@@ -687,22 +938,25 @@ async function addToAssets() {
     <div class="heading-actions"><button class="button" :disabled="!imageData" @click="addToAssets">收进素材</button><button class="button primary" :disabled="!imageData || busy" @click="saveToWorks">{{ busy ? "保存中…" : "保存作品" }}</button></div>
   </div>
   <div class="workflow"><span class="current"><b>1</b> 导入</span><i></i><span :class="{ current: imageData }"><b>2</b> 调整</span><i></i><span :class="{ current: imageData }"><b>3</b> 选尺寸</span><i></i><span :class="{ current: imageData }"><b>4</b> 导出 / 保存</span><span class="workflow-skip">流程可跳过，随时返回</span></div>
+  <input ref="collageInput" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden @change="onCollageChoose">
   <div class="editor-layout">
     <section class="preview-column">
       <div v-if="!imageData" class="upload-zone card" @click="imageInput?.click()" @dragover.prevent @drop.prevent="onDrop">
         <input ref="imageInput" type="file" accept="image/*" hidden @change="onChoose">
         <div class="upload-mark">↑</div><h2>把照片放进来</h2><p>点击选择，或把图片拖到这里</p>
         <button class="button primary" @click.stop="imageInput?.click()">选择照片</button>
+        <button class="button collage-upload-button" :disabled="loadingCollage" @click.stop="openCollageInput">{{ loadingCollage ? "正在读取…" : "选择多张做拼贴" }}</button>
         <span class="paste-hint">也可以先复制图片，再在这里按 Ctrl + V 粘贴</span>
-        <small>JPEG、PNG、WebP · 单张最大 30 MB</small>
+        <small>JPEG、PNG、WebP · 单张最大 30 MB；拼贴最多 15 张 / 合计 120 MB</small>
       </div>
       <div v-else class="preview-wrap">
         <div class="preview-toolbar">
-          <span><b>画布预览</b><small>{{ selectedTemplate.name }} · 白色纸张</small></span>
+          <span><b>画布预览</b><small>{{ selectedTemplate.name }} · {{ designOptions.pageOrientation === "landscape" ? "横版" : "竖版" }} · {{ paperColorLabel }}</small></span>
           <div class="preview-actions">
-            <button class="button small" :disabled="selectingSubject" title="当前模型自动识别人物主体，不支持任意物体" @click="selectSubject">{{ selectingSubject ? "识别中…" : subjectMask ? "重新识别主体" : "选取主体" }}</button>
+            <button v-if="!isCollage" class="button small" :disabled="selectingSubject" title="当前模型自动识别人物主体，不支持任意物体" @click="selectSubject">{{ selectingSubject ? "识别中…" : subjectMask ? "重新识别主体" : "选取主体" }}</button>
             <button v-if="subjectMask" class="text-button" :aria-pressed="selectionInverted" @click="invertSubjectSelection">{{ selectionInverted ? "恢复主体选区" : "反选区域" }}</button>
             <button v-if="subjectMask" class="text-button" @click="clearSubjectSelection">清除选区</button>
+            <button class="button small" :disabled="loadingCollage" @click="openCollageInput">{{ loadingCollage ? "读取中…" : isCollage ? "添加照片" : "多照片拼贴" }}</button>
             <button class="button small" @click="imageInput?.click()">换一张</button>
             <input ref="imageInput" type="file" accept="image/*" hidden @change="onChoose">
           </div>
@@ -712,7 +966,7 @@ async function addToAssets() {
             <canvas ref="previewCanvas" class="photo-preview-canvas" role="img" aria-label="照片预览"></canvas>
           </div>
         </div>
-        <div class="preview-foot"><span>原图完整保留比例，画布内自动留白</span><span>{{ cameraInfo || fileName }}</span></div>
+        <div class="preview-foot"><span>{{ isCollage ? `${collagePhotos.length} 张照片 · ${designOptions.collageLayout === 'grid' ? '规整网格' : '错落拼贴'} · 保留比例` : "原图完整保留比例，画布内自动留白" }}</span><span>{{ cameraInfo || fileName }}</span></div>
       </div>
       <div class="export-row">
         <button class="button primary" :disabled="!imageData" @click="exportPng">导出 PNG · 300 DPI</button>
@@ -726,10 +980,19 @@ async function addToAssets() {
       <div class="control-section"><div class="control-title"><h2>画面设置</h2><button class="text-button" @click="resetSettings">重置</button></div>
         <label class="field-label">作品名称<input v-model="title" type="text" maxlength="80" placeholder="给这件作品起个名字"></label>
         <label class="field-label">纸张尺寸<select v-model="templateId"><option v-for="item in printTemplates" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+        <label class="field-label">纸张方向<select :value="designOptions.pageOrientation" @change="onPageOrientationChange"><option value="portrait">竖版</option><option value="landscape">横版</option></select></label>
         <div class="range-label"><div class="range-heading"><span>相纸边框</span><b>{{ designOptions.frameMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.frameMm" type="range" min="0" max="24" step="0.5" aria-label="相纸边框"><input v-model.number="designOptions.frameMm" class="value-input" type="number" min="0" max="24" step="0.5" aria-label="相纸边框毫米"></div></div>
         <label class="field-label color-field">纸张底色<input v-model="designOptions.paperColor" type="color" aria-label="选择纸张底色"></label>
       </div>
-      <div class="control-section">
+      <div v-if="isCollage" class="control-section">
+        <div class="control-title"><h2>多照片拼贴</h2><span class="control-hint">{{ collagePhotos.length }} / 15 张</span></div>
+        <label class="field-label">排版方式<select v-model="designOptions.collageLayout"><option value="grid">规整网格</option><option value="masonry">错落拼贴（列高自适应）</option></select></label>
+        <label class="field-label">列数<select v-model.number="designOptions.collageColumns" @change="markCollageColumnsCustomized"><option v-for="columns in [1, 2, 3, 4, 5]" :key="columns" :value="columns">{{ columns }} 列</option></select></label>
+        <div class="range-label"><div class="range-heading"><span>照片间距</span><b>{{ designOptions.collageGapMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.collageGapMm" type="range" min="0" max="12" step="0.5" aria-label="照片间距"><input v-model.number="designOptions.collageGapMm" class="value-input" type="number" min="0" max="12" step="0.5" aria-label="照片间距毫米"></div></div>
+        <div class="collage-photo-list"><div v-for="(photo, index) in collagePhotos" :key="photo.id" class="collage-photo-row"><span class="collage-photo-index">{{ index + 1 }}</span><span class="collage-photo-name" :title="photo.fileName">{{ photo.fileName }}</span><button class="text-button" :disabled="index === 0" :aria-label="`第 ${index + 1} 张上移`" @click="moveCollagePhoto(index, -1)">↑</button><button class="text-button" :disabled="index === collagePhotos.length - 1" :aria-label="`第 ${index + 1} 张下移`" @click="moveCollagePhoto(index, 1)">↓</button><button class="text-button remove-photo-button" :aria-label="`移除第 ${index + 1} 张`" @click="removeCollagePhoto(index)">移除</button></div></div>
+        <p class="adjustment-note">拼贴采用固定列布局，不自由散落；每张图按比例缩放、不拉伸、不旋转。大尺寸打印的照片清晰度取决于原图像素。</p>
+      </div>
+      <div v-if="!isCollage" class="control-section">
         <div class="control-title"><h2>裁切与放大</h2><button class="text-button" :disabled="!imageData" @click="resetPhotoLayout">重置位置</button></div>
         <div class="fit-options"><button class="preset-chip" :class="{ selected: designOptions.fitMode === 'contain' }" :aria-pressed="designOptions.fitMode === 'contain'" :disabled="!imageData" @click="designOptions.fitMode = 'contain'">完整显示</button><button class="preset-chip" :class="{ selected: designOptions.fitMode === 'cover' }" :aria-pressed="designOptions.fitMode === 'cover'" :disabled="!imageData" @click="designOptions.fitMode = 'cover'">填满裁切</button></div>
         <div class="range-label"><div class="range-heading"><span>照片放大</span><b>{{ designOptions.zoomPercent }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.zoomPercent" type="range" min="100" max="300" step="1" aria-label="照片放大" :disabled="!imageData"><input v-model.number="designOptions.zoomPercent" class="value-input" type="number" min="100" max="300" step="1" aria-label="照片放大百分比" :disabled="!imageData"></div></div>
@@ -738,7 +1001,7 @@ async function addToAssets() {
         <button class="button small rotate-button" :disabled="!imageData" @click="rotatePhoto">旋转 90°（当前 {{ designOptions.rotation }}°）</button>
         <p class="adjustment-note">“填满裁切”会让照片铺满纸张内框，超出部分不导出；可用位置滑杆调整保留区域。原图不改写。</p>
       </div>
-      <div class="control-section">
+      <div v-if="!isCollage" class="control-section">
         <div class="control-title"><h2>照片放大虚化背景</h2><span class="control-hint">单张照片</span></div>
         <label class="toggle-field"><input v-model="designOptions.blurBackground" type="checkbox" :disabled="!imageData"><span>使用照片放大模糊作为底图</span></label>
         <template v-if="designOptions.blurBackground">
@@ -752,12 +1015,12 @@ async function addToAssets() {
         <label class="toggle-field"><input v-model="designOptions.watermarkEnabled" type="checkbox" :disabled="!imageData"><span>在成品上添加水印</span></label>
         <template v-if="designOptions.watermarkEnabled">
           <label class="field-label">作者 / 自定义文字<input v-model="designOptions.watermarkText" type="text" maxlength="100" placeholder="例如：摄影：你的名字"></label>
-          <label class="toggle-field"><input v-model="designOptions.watermarkIncludeMetadata" type="checkbox" :disabled="!imageData"><span>附加照片可读取的 EXIF 参数</span></label>
+          <label class="toggle-field"><input v-model="designOptions.watermarkIncludeMetadata" type="checkbox" :disabled="!imageData || isCollage"><span>附加照片可读取的 EXIF 参数</span></label>
           <label class="field-label">水印位置<select v-model="designOptions.watermarkPosition"><option value="top-left">左上</option><option value="top-center">上方居中</option><option value="top-right">右上</option><option value="bottom-left">左下</option><option value="bottom-center">下方居中</option><option value="bottom-right">右下</option></select></label>
           <div class="range-label"><div class="range-heading"><span>字号</span><b>{{ designOptions.watermarkFontSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.watermarkFontSizeMm" type="range" min="2" max="18" step="0.5" aria-label="水印字号"><input v-model.number="designOptions.watermarkFontSizeMm" class="value-input" type="number" min="2" max="18" step="0.5" aria-label="水印字号毫米"></div></div>
           <div class="range-label"><div class="range-heading"><span>透明度</span><b>{{ designOptions.watermarkOpacity }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.watermarkOpacity" type="range" min="10" max="100" step="1" aria-label="水印透明度"><input v-model.number="designOptions.watermarkOpacity" class="value-input" type="number" min="10" max="100" step="1" aria-label="水印透明度百分比"></div></div>
           <label class="field-label color-field">水印颜色<input v-model="designOptions.watermarkColor" type="color" aria-label="选择水印颜色"></label>
-          <p class="adjustment-note">可选添加相机、镜头、焦距、光圈、快门、ISO 和拍摄时间；原图没有记录的参数不会补造。水印只绘入导出成品，不改写原图。</p>
+          <p class="adjustment-note">单张照片可选添加相机、镜头、焦距、光圈、快门、ISO 和拍摄时间；原图没有记录的参数不会补造。水印只绘入导出成品，不改写原图。</p>
         </template>
       </div>
       <div class="control-section"><div class="control-title"><h2>快速色调</h2><span class="control-hint">应用后可继续微调</span></div>
@@ -798,12 +1061,13 @@ async function addToAssets() {
 <style scoped>
 .editor-page{display:flex;flex-direction:column;width:100%;height:100%;min-height:0;overflow:hidden}.editor-heading{display:flex;justify-content:space-between;align-items:end;gap:20px;flex:0 0 auto}.heading-actions{display:flex;gap:8px}
 .workflow{display:flex;align-items:center;gap:9px;padding:17px 0 20px;color:#b0b1aa;font-size:10px;flex:0 0 auto}.workflow span{white-space:nowrap}.workflow b{display:inline-grid;place-items:center;width:20px;height:20px;border:1px solid #dedfd8;border-radius:50%;font-size:9px;margin-right:5px;font-weight:500}.workflow .current{color:#4e5148}.workflow .current b{background:#30312c;color:white;border-color:#30312c}.workflow i{height:1px;background:#e5e6df;width:34px}.workflow-skip{margin-left:auto;color:#9c9e95}
-.editor-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:stretch;flex:1;min-height:0;overflow:hidden}.preview-column{min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain}.upload-zone{min-height:490px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-style:dashed;background:#fbfbf9;cursor:pointer}.upload-mark{display:grid;place-items:center;width:54px;height:54px;border-radius:18px;background:#efefe9;font-size:24px;color:#686a60}.upload-zone h2{font-size:17px;margin:18px 0 6px}.upload-zone p{font-size:11px;color:#92948b;margin:0 0 18px}.paste-hint{margin-top:14px;color:#7f8178;font-size:10px}.upload-zone small{margin-top:20px;color:#b0b1aa;font-size:9px}
-.preview-wrap{background:#f0f0eb;border:1px solid #e6e6df;border-radius:11px;overflow:hidden}.preview-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;background:#fff}.preview-toolbar span{display:grid;gap:4px}.preview-toolbar b{font-size:11px}.preview-toolbar small{font-size:9px;color:#9a9b93}.preview-actions{display:flex;align-items:center;gap:7px}.canvas-stage{min-height:430px;display:grid;place-items:center;padding:35px;background:#eeeee9}.print-canvas{width:min(74%,410px);max-height:500px;background:white;box-shadow:none;display:flex;align-items:center;justify-content:center;overflow:hidden}.photo-preview-canvas{display:block;width:100%;height:100%;object-fit:contain}.preview-foot{background:#fff;padding:10px 13px;display:flex;justify-content:space-between;font-size:9px;color:#96978f}
+.editor-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px;align-items:stretch;flex:1;min-height:0;overflow:hidden}.preview-column{min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain}.upload-zone{min-height:490px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-style:dashed;background:#fbfbf9;cursor:pointer}.upload-mark{display:grid;place-items:center;width:54px;height:54px;border-radius:18px;background:#efefe9;font-size:24px;color:#686a60}.upload-zone h2{font-size:17px;margin:18px 0 6px}.upload-zone p{font-size:11px;color:#92948b;margin:0 0 18px}.paste-hint{margin-top:14px;color:#7f8178;font-size:10px}.upload-zone small{margin-top:20px;color:#b0b1aa;font-size:9px}.collage-upload-button{margin-top:8px}
+.preview-wrap{background:#f0f0eb;border:1px solid #e6e6df;border-radius:11px;overflow:hidden}.preview-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;background:#fff}.preview-toolbar span{display:grid;gap:4px}.preview-toolbar b{font-size:11px}.preview-toolbar small{font-size:9px;color:#9a9b93}.preview-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}.canvas-stage{min-height:430px;display:grid;place-items:center;padding:35px;background:#eeeee9}.print-canvas{width:min(74%,410px);max-height:500px;background:white;box-shadow:none;display:flex;align-items:center;justify-content:center;overflow:hidden}.photo-preview-canvas{display:block;width:100%;height:100%;object-fit:contain}.preview-foot{background:#fff;padding:10px 13px;display:flex;justify-content:space-between;gap:8px;font-size:9px;color:#96978f}
 .export-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}.export-row>span{font-size:9px;color:#96978e;margin-left:auto}.export-spec{margin-top:7px;color:#72746c;font-size:9px}.notice{margin-top:10px;background:#edf1e9;border:1px solid #e1e8db;padding:10px 12px;border-radius:7px;color:#5f7059;font-size:10px}
 .controls{position:static;align-self:stretch;height:100%;min-height:0;max-height:none;overflow-y:auto;overscroll-behavior:contain;padding:0 16px;scrollbar-width:thin;scrollbar-color:#d6d7cf transparent}.control-section{padding:17px 0;border-bottom:1px solid #efefeb}.control-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control-title h2{font-size:12px;margin:0;font-weight:600}.text-button{border:0;background:none;color:#797b72;font-size:9px}.text-button:disabled{color:#c3c4be}.history-actions{display:flex;gap:8px}
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
 .field-label.color-field input[type=color]{width:100%;height:32px;padding:3px;cursor:pointer}.fit-options{display:grid;grid-template-columns:1fr 1fr;gap:6px}.fit-options .preset-chip{height:34px}.rotate-button{margin-top:13px}.toggle-field{display:flex;align-items:center;gap:8px;color:#6f7168;font-size:10px}.toggle-field input{accent-color:#56594e}
+.collage-photo-list{display:grid;gap:6px;margin-top:14px}.collage-photo-row{display:grid;grid-template-columns:18px minmax(0,1fr) 20px 20px 34px;align-items:center;gap:5px;border-bottom:1px solid #f0f0ec;padding:5px 0}.collage-photo-index{color:#9a9b93;font-size:9px;text-align:center}.collage-photo-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#65675e;font-size:9px}.collage-photo-row .text-button{padding:3px 0}.collage-photo-row .text-button:disabled{opacity:.35}.remove-photo-button{color:#9a6a62!important}
 .range-label{display:grid;gap:8px;margin-top:14px}.range-heading{display:flex;justify-content:space-between;align-items:baseline;color:#76786f;font-size:9px}.range-heading label{cursor:pointer}.range-heading b{color:#565850;font-weight:500}.range-inputs{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center}.range-inputs input[type=range]{width:100%;accent-color:#56594e;height:13px}.range-inputs .value-input{width:72px;height:28px;border:1px solid #e5e5df;border-radius:5px;padding:0 5px;color:#4a4b44;background:white;font-size:10px;text-align:right}.range-inputs .value-input:focus{border-color:#a8aa9e;outline:none}
 .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset-chip{height:31px;border:1px solid #e8e8e2;background:white;border-radius:6px;font-size:9px;color:#777970}.preset-chip.selected{border-color:#777a6e;background:#f2f2ee;color:#373930}
 .preset-groups{display:grid;gap:12px}.preset-group{display:grid;gap:6px}.preset-group-title{font-size:9px;color:#96978e}
