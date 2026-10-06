@@ -170,10 +170,8 @@ function setImage(file: File) {
     inspectImage(file).then((info) => {
       const fields = [info.make, info.camera, info.lens].filter(Boolean);
       cameraInfo.value = fields.join(" · ") || (info.width + " × " + info.height + " px");
-    }).catch((error) => {
-      cameraInfo.value = error instanceof TypeError
-        ? "图片信息服务未连接；照片编辑仍可用。"
-        : "暂时无法读取相机信息；照片编辑仍可用。";
+    }).catch(() => {
+      cameraInfo.value = "暂时无法读取图片信息；照片编辑仍可用。";
     });
   };
   reader.readAsDataURL(file);
