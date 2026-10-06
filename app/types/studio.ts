@@ -19,6 +19,19 @@ export interface SubjectMask {
   height: number;
 }
 
+export interface PhotoMetadata {
+  width: number;
+  height: number;
+  make: string;
+  camera: string;
+  lens: string;
+  taken_at: string;
+  aperture: string;
+  exposure: string;
+  iso: string;
+  focalLength: string;
+}
+
 export interface PrintDesignOptions {
   fitMode: "contain" | "cover";
   zoomPercent: number;
@@ -30,6 +43,13 @@ export interface PrintDesignOptions {
   blurBackground: boolean;
   backgroundZoom: number;
   backgroundBlur: number;
+  watermarkEnabled: boolean;
+  watermarkText: string;
+  watermarkIncludeMetadata: boolean;
+  watermarkFontSizeMm: number;
+  watermarkOpacity: number;
+  watermarkColor: string;
+  watermarkPosition: "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
 }
 
 export interface StudioWork {
@@ -39,6 +59,7 @@ export interface StudioWork {
   templateId: string;
   settings: EditSettings;
   designOptions?: Partial<PrintDesignOptions>;
+  photoMetadata?: PhotoMetadata;
   subjectSelection?: "person" | "inverse-person";
   updatedAt: string;
 }

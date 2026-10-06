@@ -4,7 +4,7 @@ import { printTemplates } from "../composables/useTemplates";
 import { useLocalStudio } from "../composables/useLocalStudio";
 import { applyPhotoAdjustments } from "../utils/photo-adjustments";
 import { segmentPerson } from "../utils/person-segmentation";
-import type { EditSettings, PrintDesignOptions, StudioWork, SubjectMask } from "../types/studio";
+import type { EditSettings, PhotoMetadata, PrintDesignOptions, StudioWork, SubjectMask } from "../types/studio";
 
 const route = useRoute();
 const studio = useLocalStudio();
@@ -15,12 +15,15 @@ const title = ref("未命名作品");
 const templateId = ref("photo-4x6");
 const defaultDesignOptions: PrintDesignOptions = {
   fitMode: "contain", zoomPercent: 100, offsetX: 0, offsetY: 0, rotation: 0,
-  frameMm: 6, paperColor: "#ffffff", blurBackground: false, backgroundZoom: 125, backgroundBlur: 18
+  frameMm: 6, paperColor: "#ffffff", blurBackground: false, backgroundZoom: 125, backgroundBlur: 18,
+  watermarkEnabled: false, watermarkText: "", watermarkIncludeMetadata: false,
+  watermarkFontSizeMm: 3, watermarkOpacity: 80, watermarkColor: "#ffffff", watermarkPosition: "bottom-right"
 };
 const designOptions = reactive<PrintDesignOptions>({ ...defaultDesignOptions });
 const busy = ref(false);
 const notice = ref("");
 const cameraInfo = ref("");
+const photoMetadata = shallowRef<PhotoMetadata | null>(null);
 const settings = reactive<EditSettings>({ exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0, warmth: 0, subjectExposure: 0, subjectContrast: 0, preset: "原片" });
 const imageInput = ref<HTMLInputElement | null>(null);
 const previewCanvas = ref<HTMLCanvasElement | null>(null);
@@ -101,6 +104,8 @@ onMounted(async () => {
     templateId.value = work.templateId;
     Object.assign(settings, migrateLegacySettings(work.settings));
     Object.assign(designOptions, defaultDesignOptions, work.designOptions || {});
+    photoMetadata.value = work.photoMetadata || null;
+    if (photoMetadata.value) cameraInfo.value = [photoMetadata.value.make, photoMetadata.value.camera, photoMetadata.value.lens].filter(Boolean).join(" · ");
     if (work.subjectSelection === "person" || work.subjectSelection === "inverse-person") {
       selectionInverted.value = work.subjectSelection === "inverse-person";
       void selectSubject();
@@ -109,7 +114,7 @@ onMounted(async () => {
   window.addEventListener("paste", handlePaste);
   window.addEventListener("resize", queuePreviewRender);
 });
-watch([imageData, templateId, settings, designOptions], queuePreviewRender, { deep: true, flush: "post" });
+watch([imageData, templateId, settings, designOptions, photoMetadata], queuePreviewRender, { deep: true, flush: "post" });
 onBeforeUnmount(() => {
   window.removeEventListener("paste", handlePaste);
   window.removeEventListener("resize", queuePreviewRender);
@@ -134,7 +139,7 @@ async function renderPreview() {
   try {
     const image = await loadPhotoImage(source);
     const maxEdge = isAdjustingPreview.value ? adjustingPreviewMaxEdge : previewMaxEdge;
-    if (revision === previewRevision) drawPhoto(canvas, image, maxEdge, subjectMask.value, selectionInverted.value);
+    if (revision === previewRevision) drawPhoto(canvas, image, maxEdge, subjectMask.value, selectionInverted.value, true);
   } catch {
     notice.value = "照片预览处理失败；可以重新导入这张照片再试。";
   }
@@ -150,7 +155,7 @@ async function loadPhotoImage(source: string) {
   return image;
 }
 
-function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: number, mask: SubjectMask | null, invertMask = false) {
+function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: number, mask: SubjectMask | null, invertMask = false, showSelectionOverlay = false) {
   const scale = Math.min(1, maxEdge / Math.max(outputWidth.value, outputHeight.value));
   canvas.width = Math.max(1, Math.round(outputWidth.value * scale));
   canvas.height = Math.max(1, Math.round(outputHeight.value * scale));
@@ -209,10 +214,62 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   context.translate(centerX + offsetX, centerY + offsetY);
   context.rotate(designOptions.rotation * Math.PI / 180);
   context.drawImage(photoLayer, -photoWidth / 2, -photoHeight / 2, photoWidth, photoHeight);
-  if (mask) {
+  if (mask && showSelectionOverlay) {
     const overlay = createSelectionOverlay(mask, invertMask);
     context.drawImage(overlay, -photoWidth / 2, -photoHeight / 2, photoWidth, photoHeight);
   }
+  context.restore();
+  if (designOptions.watermarkEnabled) drawWatermark(context, canvas);
+}
+
+function drawWatermark(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement) {
+  const metadata = photoMetadata.value;
+  const metadataLine = metadata && designOptions.watermarkIncludeMetadata
+    ? [
+        [metadata.make, metadata.camera].filter(Boolean).join(" "), metadata.lens,
+        metadata.focalLength ? metadata.focalLength + " mm" : "",
+        metadata.aperture ? "f/" + metadata.aperture : "",
+        metadata.exposure, metadata.iso ? "ISO " + metadata.iso : "", metadata.taken_at
+      ].filter(Boolean).join(" · ")
+    : "";
+  const watermark = [designOptions.watermarkText.trim(), metadataLine].filter(Boolean).join(" · ");
+  if (!watermark) return;
+
+  const dpi = canvas.width / (selectedTemplate.value.widthMm / 25.4);
+  const fontSize = Math.max(1, Math.min(18, designOptions.watermarkFontSizeMm) / 25.4 * dpi);
+  const margin = Math.max(1, 3 / 25.4 * dpi);
+  const maxWidth = Math.max(1, canvas.width - margin * 2);
+  const lineHeight = fontSize * 1.35;
+  context.font = `${fontSize}px Arial, sans-serif`;
+  const lines: string[] = [];
+  let line = "";
+  for (const character of Array.from(watermark.replace(/\s*·\s*/g, " · "))) {
+    const candidate = line + character;
+    if (line && context.measureText(candidate).width > maxWidth) {
+      lines.push(line.trimEnd());
+      line = character.trimStart();
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line.trimEnd());
+  if (lines.length > 4) {
+    lines.splice(3);
+    lines[3] = "…";
+  }
+
+  const position = designOptions.watermarkPosition;
+  const align: CanvasTextAlign = position.endsWith("left") ? "left" : position.endsWith("right") ? "right" : "center";
+  const x = align === "left" ? margin : align === "right" ? canvas.width - margin : canvas.width / 2;
+  const top = position.startsWith("top");
+  const y = top ? margin : canvas.height - margin - lineHeight * lines.length;
+  context.save();
+  context.globalAlpha = Math.max(0, Math.min(100, designOptions.watermarkOpacity)) / 100;
+  context.fillStyle = designOptions.watermarkColor;
+  context.textAlign = align;
+  context.textBaseline = "top";
+  context.font = `${fontSize}px Arial, sans-serif`;
+  lines.forEach((content, index) => context.fillText(content, x, y + index * lineHeight, maxWidth));
   context.restore();
 }
 
@@ -246,9 +303,11 @@ function setImage(file: File) {
   }
   const reader = new FileReader();
   reader.onload = () => {
-    imageData.value = String(reader.result || "");
+    const loadedData = String(reader.result || "");
+    imageData.value = loadedData;
     subjectMask.value = null;
     selectionInverted.value = false;
+    photoMetadata.value = null;
     settings.subjectExposure = 0;
     settings.subjectContrast = 0;
     fileName.value = file.name;
@@ -256,6 +315,8 @@ function setImage(file: File) {
     notice.value = "照片已载入。原图不会被覆盖，调整可以随时修改。";
     cameraInfo.value = "";
     inspectImage(file).then((info) => {
+      if (imageData.value !== loadedData) return;
+      photoMetadata.value = info;
       const fields = [info.make, info.camera, info.lens].filter(Boolean);
       cameraInfo.value = fields.join(" · ") || (info.width + " × " + info.height + " px");
     }).catch(() => {
@@ -581,6 +642,7 @@ async function saveToWorks() {
       templateId: templateId.value,
       settings: { ...settings },
       designOptions: { ...designOptions },
+      ...(photoMetadata.value ? { photoMetadata: { ...photoMetadata.value } } : {}),
       ...(subjectMask.value ? { subjectSelection: selectionInverted.value ? "inverse-person" as const : "person" as const } : {}),
       updatedAt: new Date().toISOString()
     };
@@ -684,6 +746,19 @@ async function addToAssets() {
           <div class="range-label"><div class="range-heading"><span>背景放大</span><b>{{ designOptions.backgroundZoom }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.backgroundZoom" type="range" min="100" max="220" step="1" aria-label="背景放大"><input v-model.number="designOptions.backgroundZoom" class="value-input" type="number" min="100" max="220" step="1" aria-label="背景放大百分比"></div></div>
         </template>
         <p class="adjustment-note">模糊背景只用于填满整张纸，前景照片仍保持清晰；浏览器和设备性能会影响大图处理速度。</p>
+      </div>
+      <div class="control-section">
+        <div class="control-title"><h2>水印与拍摄信息</h2><span class="control-hint">本机读取 EXIF</span></div>
+        <label class="toggle-field"><input v-model="designOptions.watermarkEnabled" type="checkbox" :disabled="!imageData"><span>在成品上添加水印</span></label>
+        <template v-if="designOptions.watermarkEnabled">
+          <label class="field-label">作者 / 自定义文字<input v-model="designOptions.watermarkText" type="text" maxlength="100" placeholder="例如：摄影：你的名字"></label>
+          <label class="toggle-field"><input v-model="designOptions.watermarkIncludeMetadata" type="checkbox" :disabled="!imageData"><span>附加照片可读取的 EXIF 参数</span></label>
+          <label class="field-label">水印位置<select v-model="designOptions.watermarkPosition"><option value="top-left">左上</option><option value="top-center">上方居中</option><option value="top-right">右上</option><option value="bottom-left">左下</option><option value="bottom-center">下方居中</option><option value="bottom-right">右下</option></select></label>
+          <div class="range-label"><div class="range-heading"><span>字号</span><b>{{ designOptions.watermarkFontSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.watermarkFontSizeMm" type="range" min="2" max="18" step="0.5" aria-label="水印字号"><input v-model.number="designOptions.watermarkFontSizeMm" class="value-input" type="number" min="2" max="18" step="0.5" aria-label="水印字号毫米"></div></div>
+          <div class="range-label"><div class="range-heading"><span>透明度</span><b>{{ designOptions.watermarkOpacity }}%</b></div><div class="range-inputs"><input v-model.number="designOptions.watermarkOpacity" type="range" min="10" max="100" step="1" aria-label="水印透明度"><input v-model.number="designOptions.watermarkOpacity" class="value-input" type="number" min="10" max="100" step="1" aria-label="水印透明度百分比"></div></div>
+          <label class="field-label color-field">水印颜色<input v-model="designOptions.watermarkColor" type="color" aria-label="选择水印颜色"></label>
+          <p class="adjustment-note">可选添加相机、镜头、焦距、光圈、快门、ISO 和拍摄时间；原图没有记录的参数不会补造。水印只绘入导出成品，不改写原图。</p>
+        </template>
       </div>
       <div class="control-section"><div class="control-title"><h2>快速色调</h2><span class="control-hint">应用后可继续微调</span></div>
         <div class="preset-groups">
