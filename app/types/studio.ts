@@ -32,7 +32,17 @@ export interface PhotoMetadata {
   focalLength: string;
 }
 
-export interface CollagePhoto {
+export type CollageAdjustmentKey = "exposure" | "contrast" | "highlights" | "shadows" | "temperature" | "tint" | "saturation" | "vibrance" | "warmth";
+
+export interface CollagePhotoOptions {
+  fitMode?: "contain" | "cover";
+  zoomPercent?: number;
+  offsetX?: number;
+  offsetY?: number;
+  adjustments?: Partial<Record<CollageAdjustmentKey, number>>;
+}
+
+export interface CollagePhoto extends CollagePhotoOptions {
   id: string;
   fileName: string;
   imageData: string;
@@ -72,6 +82,7 @@ export interface StudioWork {
   settings: EditSettings;
   designOptions?: Partial<PrintDesignOptions>;
   photoMetadata?: PhotoMetadata;
+  primaryPhotoOptions?: CollagePhotoOptions;
   additionalPhotos?: CollagePhoto[];
   subjectSelection?: "person" | "inverse-person";
   updatedAt: string;
