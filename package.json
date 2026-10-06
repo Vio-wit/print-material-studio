@@ -11,6 +11,7 @@
     "preview": "nuxt preview"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
     "nuxt": "^4.6.0",
     "pdf-lib": "^1.17.1",
     "vue": "^3.5.0"

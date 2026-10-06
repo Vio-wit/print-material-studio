@@ -1,4 +1,4 @@
-import type { EditSettings } from "../types/studio";
+import type { EditSettings, SubjectMask } from "../types/studio";
 
 export type PhotoAdjustmentValues = Omit<EditSettings, "preset">;
 
@@ -22,9 +22,17 @@ function toSrgb(value: number) {
 }
 
 /** Apply editable, approximate sRGB adjustments to a fresh copy of the source pixels. */
-export function applyPhotoAdjustments(pixels: Uint8ClampedArray, settings: PhotoAdjustmentValues) {
+export function applyPhotoAdjustments(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  settings: PhotoAdjustmentValues,
+  subjectMask?: SubjectMask | null
+) {
   const exposureGain = 2 ** settings.exposure;
   const contrast = 1 + settings.contrast / 100;
+  const subjectExposureGain = 2 ** settings.subjectExposure;
+  const subjectContrast = 1 + settings.subjectContrast / 100;
   const warmth = settings.warmth / 100;
   const vibrance = settings.vibrance / 100;
   const saturation = 1 + settings.saturation / 100;
@@ -32,6 +40,9 @@ export function applyPhotoAdjustments(pixels: Uint8ClampedArray, settings: Photo
   const greenGain = 2 ** (-settings.tint / 100 * 0.22);
 
   for (let index = 0; index < pixels.length; index += 4) {
+    const pixel = index / 4;
+    const x = pixel % width;
+    const y = Math.floor(pixel / width);
     let red = toLinear(pixels[index]!) * temperatureGain * exposureGain;
     let green = toLinear(pixels[index + 1]!) * greenGain * exposureGain;
     let blue = toLinear(pixels[index + 2]!) / temperatureGain * exposureGain;
@@ -57,6 +68,20 @@ export function applyPhotoAdjustments(pixels: Uint8ClampedArray, settings: Photo
     red = adjustedLuminance + (red - adjustedLuminance) * colorGain;
     green = adjustedLuminance + (green - adjustedLuminance) * colorGain;
     blue = adjustedLuminance + (blue - adjustedLuminance) * colorGain;
+
+    if (subjectMask && (settings.subjectExposure !== 0 || settings.subjectContrast !== 0)) {
+      const maskX = Math.min(subjectMask.width - 1, Math.floor(x / width * subjectMask.width));
+      const maskY = Math.min(subjectMask.height - 1, Math.floor(y / height * subjectMask.height));
+      const maskAmount = clamp(subjectMask.data[maskY * subjectMask.width + maskX] || 0);
+      if (maskAmount > 0) {
+        const subjectRed = ((red - 0.18) * subjectContrast + 0.18) * subjectExposureGain;
+        const subjectGreen = ((green - 0.18) * subjectContrast + 0.18) * subjectExposureGain;
+        const subjectBlue = ((blue - 0.18) * subjectContrast + 0.18) * subjectExposureGain;
+        red += (subjectRed - red) * maskAmount;
+        green += (subjectGreen - green) * maskAmount;
+        blue += (subjectBlue - blue) * maskAmount;
+      }
+    }
 
     let outputRed = toSrgb(red);
     let outputGreen = toSrgb(green);

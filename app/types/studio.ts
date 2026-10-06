@@ -8,7 +8,15 @@ export interface EditSettings {
   saturation: number;
   vibrance: number;
   warmth: number;
+  subjectExposure: number;
+  subjectContrast: number;
   preset: string;
+}
+
+export interface SubjectMask {
+  data: Float32Array;
+  width: number;
+  height: number;
 }
 
 export interface StudioWork {
@@ -17,6 +25,7 @@ export interface StudioWork {
   imageData: string;
   templateId: string;
   settings: EditSettings;
+  subjectSelection?: "person";
   updatedAt: string;
 }
 
