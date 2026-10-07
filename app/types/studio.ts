@@ -50,7 +50,7 @@ export interface CollagePhoto extends CollagePhotoOptions {
   photoMetadata?: PhotoMetadata;
 }
 
-export type PhotoLayoutPreset = "classic" | "polaroid" | "poster" | "postcard" | "album-cover";
+export type PhotoLayoutPreset = "classic" | "polaroid" | "poster" | "postcard" | "album-cover" | "ticket";
 
 export interface PrintDesignOptions {
   fitMode: "contain" | "cover";
@@ -70,6 +70,7 @@ export interface PrintDesignOptions {
   layoutTitleSizeMm: number;
   layoutSubtitleSizeMm: number;
   layoutAccentColor: string;
+  ticketSerial: string;
   lightFrameEnabled: boolean;
   lightFrameRadiusMm: number;
   lightFrameLogoText: string;

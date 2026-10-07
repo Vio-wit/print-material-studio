@@ -17,7 +17,7 @@ const templateId = ref("photo-4x6");
 const defaultDesignOptions: PrintDesignOptions = {
   fitMode: "contain", zoomPercent: 100, offsetX: 0, offsetY: 0, rotation: 0,
   frameMm: 6, paperColor: "#ffffff", blurBackground: false, backgroundZoom: 125, backgroundBlur: 18,
-  layoutPreset: "classic", layoutTitle: "", layoutSubtitle: "", layoutAuthor: "", layoutTitleSizeMm: 7, layoutSubtitleSizeMm: 3.5, layoutAccentColor: "#c39b69",
+  layoutPreset: "classic", layoutTitle: "", layoutSubtitle: "", layoutAuthor: "", layoutTitleSizeMm: 7, layoutSubtitleSizeMm: 3.5, layoutAccentColor: "#c39b69", ticketSerial: "001",
   lightFrameEnabled: false, lightFrameRadiusMm: 1.5, lightFrameLogoText: "", lightFrameLogoSizeMm: 3.5,
   lightFrameMetadataSizeMm: 2, lightFrameLogoColor: "#ffffff", lightFrameBorderMm: 3, lightFrameBottomMm: 12,
   lightFrameShadowSizeMm: 5, lightFrameShadowDepth: 42, lightFrameShadowColor: "#808080", lightFrameShowMetadata: true,
@@ -91,14 +91,16 @@ const photoLayoutPresets: Array<{ id: PhotoLayoutPreset; name: string; descripti
   { id: "polaroid", name: "拍立得白边", description: "上、左右留白，底部加标题区。" },
   { id: "poster", name: "摄影海报", description: "主图配标题、副标题和作者信息。" },
   { id: "postcard", name: "明信片正面", description: "照片与卡片文字区分层排布。" },
-  { id: "album-cover", name: "方形封面", description: "满版照片加封面标题层。" }
+  { id: "album-cover", name: "方形封面", description: "满版照片加封面标题层。" },
+  { id: "ticket", name: "票根形状", description: "横向票面、撕口虚线与可编辑副券编号。" }
 ];
 const templateRecommendedLayouts: Record<string, PhotoLayoutPreset> = {
   "photo-4x6": "polaroid",
   "photo-5x7": "polaroid",
   a5: "poster",
   "square-10": "album-cover",
-  postcard: "postcard"
+  postcard: "postcard",
+  "ticket-180x70": "ticket"
 };
 const recommendedPhotoLayout = computed(() => photoLayoutPresets.find((preset) => preset.id === templateRecommendedLayouts[templateId.value]) || photoLayoutPresets[0]!);
 const pageWidthMm = computed(() => designOptions.pageOrientation === "landscape" ? Math.max(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm) : Math.min(selectedTemplate.value.widthMm, selectedTemplate.value.heightMm));
@@ -289,6 +291,10 @@ function getPhotoLayoutBox(canvasWidth: number, canvasHeight: number, dpi: numbe
   const mmToPx = (mm: number) => mm / 25.4 * dpi;
   const baseMargin = Math.max(0, designOptions.frameMm);
   if (designOptions.layoutPreset === "album-cover") return { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
+  if (designOptions.layoutPreset === "ticket") {
+    const margin = mmToPx(Math.max(3, baseMargin));
+    return { x: margin, y: margin, width: canvasWidth * 0.32, height: Math.max(1, canvasHeight - margin * 2) };
+  }
 
   const marginMm = designOptions.layoutPreset === "classic"
     ? (lightFrameActive ? designOptions.lightFrameBorderMm : baseMargin)
@@ -320,9 +326,14 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("无法创建照片预览画布");
 
-  context.fillStyle = designOptions.paperColor;
-  context.fillRect(0, 0, canvas.width, canvas.height);
   const dpi = canvas.width / (pageWidthMm.value / 25.4);
+  if (designOptions.layoutPreset === "ticket") {
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    drawTicketBase(context, canvas.width, canvas.height, dpi);
+  } else {
+    context.fillStyle = designOptions.paperColor;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }
   const lightFrameActive = designOptions.lightFrameEnabled && designOptions.layoutPreset === "classic";
   const rotated = designOptions.rotation % 180 !== 0;
   const fitWidth = rotated ? image.naturalHeight : image.naturalWidth;
@@ -386,8 +397,12 @@ function drawPhoto(canvas: HTMLCanvasElement, image: HTMLImageElement, maxEdge: 
     );
   }
   context.save();
-  context.beginPath();
-  context.rect(areaX, areaY, maxWidth, maxHeight);
+  if (designOptions.layoutPreset === "ticket") {
+    traceRoundedRect(context, areaX, areaY, maxWidth, maxHeight, Math.min(maxHeight * 0.06, dpi / 25.4 * 2));
+  } else {
+    context.beginPath();
+    context.rect(areaX, areaY, maxWidth, maxHeight);
+  }
   context.clip();
   if (lightFrameActive) {
     traceRoundedRect(context, frameX, frameY, frameWidth, frameHeight, cornerRadius);
@@ -421,7 +436,9 @@ function drawPhotoLayoutDecorations(context: CanvasRenderingContext2D, canvas: H
 
   context.save();
   context.textBaseline = "alphabetic";
-  if (designOptions.layoutPreset === "polaroid") {
+  if (designOptions.layoutPreset === "ticket") {
+    drawTicketDetails(context, canvas, photoBox, dpi, titleText, subtitleText, authorText, titleSize, subtitleSize);
+  } else if (designOptions.layoutPreset === "polaroid") {
     context.fillStyle = designOptions.paperColor;
     context.fillRect(photoBox.x, captionTop, photoBox.width, captionHeight);
     context.textAlign = "center";
@@ -483,6 +500,95 @@ function drawPhotoLayoutDecorations(context: CanvasRenderingContext2D, canvas: H
     }
   }
   context.restore();
+}
+
+function traceTicketShape(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, cornerRadius: number, notchRadius: number) {
+  const radius = Math.max(0, Math.min(cornerRadius, width / 2, height / 2));
+  const notch = Math.max(0, Math.min(notchRadius, height / 2 - radius));
+  const middle = y + height / 2;
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(x + width - radius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + radius);
+  context.lineTo(x + width, middle - notch);
+  if (notch > 0) context.arc(x + width, middle, notch, -Math.PI / 2, Math.PI / 2, true);
+  context.lineTo(x + width, y + height - radius);
+  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  context.lineTo(x + radius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - radius);
+  context.lineTo(x, middle + notch);
+  if (notch > 0) context.arc(x, middle, notch, Math.PI / 2, -Math.PI / 2, true);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+}
+
+function drawTicketBase(context: CanvasRenderingContext2D, width: number, height: number, dpi: number) {
+  const mmToPx = (mm: number) => mm / 25.4 * dpi;
+  const inset = Math.max(1, mmToPx(0.5));
+  traceTicketShape(context, inset, inset, width - inset * 2, height - inset * 2, mmToPx(2.5), mmToPx(4.5));
+  context.fillStyle = designOptions.paperColor;
+  context.fill();
+  context.lineWidth = Math.max(1, mmToPx(0.35));
+  context.strokeStyle = colorWithAlpha(designOptions.layoutAccentColor, 0.82);
+  context.stroke();
+}
+
+function drawTicketDetails(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  photoBox: PhotoLayoutBox,
+  dpi: number,
+  titleText: string,
+  subtitleText: string,
+  authorText: string,
+  titleSize: number,
+  subtitleSize: number
+) {
+  const mmToPx = (mm: number) => mm / 25.4 * dpi;
+  const padding = mmToPx(6);
+  const stubWidth = mmToPx(25);
+  const seamX = canvas.width - stubWidth - padding;
+  const textLeft = photoBox.x + photoBox.width + mmToPx(5);
+  const textWidth = Math.max(1, seamX - textLeft - mmToPx(4));
+  const middleY = canvas.height / 2;
+
+  context.fillStyle = designOptions.layoutAccentColor;
+  context.textAlign = "left";
+  context.font = `600 ${Math.max(1, subtitleSize * 0.82)}px Arial, "Microsoft YaHei", sans-serif`;
+  context.fillText("活动票  /  ADMISSION", textLeft, padding + subtitleSize, textWidth);
+  context.fillStyle = "#30312c";
+  context.font = `700 ${titleSize}px Arial, "Microsoft YaHei", sans-serif`;
+  context.fillText(titleText, textLeft, middleY - mmToPx(4), textWidth);
+  context.fillStyle = "#66685f";
+  context.font = `400 ${subtitleSize}px Arial, "Microsoft YaHei", sans-serif`;
+  if (subtitleText) context.fillText(subtitleText, textLeft, middleY + mmToPx(3), textWidth);
+  if (authorText) {
+    context.fillStyle = designOptions.layoutAccentColor;
+    context.fillText(authorText, textLeft, canvas.height - padding, textWidth);
+  }
+
+  context.save();
+  context.setLineDash([mmToPx(1.2), mmToPx(1.1)]);
+  context.lineWidth = Math.max(1, mmToPx(0.35));
+  context.strokeStyle = colorWithAlpha(designOptions.layoutAccentColor, 0.72);
+  context.beginPath();
+  context.moveTo(seamX, padding);
+  context.lineTo(seamX, canvas.height - padding);
+  context.stroke();
+  context.restore();
+
+  const stubCenterX = seamX + (canvas.width - seamX) / 2;
+  context.textAlign = "center";
+  context.fillStyle = "#777970";
+  context.font = `400 ${mmToPx(2.5)}px Arial, "Microsoft YaHei", sans-serif`;
+  context.fillText("副券", stubCenterX, middleY - mmToPx(7), stubWidth);
+  context.fillStyle = "#30312c";
+  context.font = `700 ${mmToPx(4)}px Arial, "Microsoft YaHei", sans-serif`;
+  context.fillText(designOptions.ticketSerial.trim() || "001", stubCenterX, middleY + mmToPx(1), stubWidth);
+  context.fillStyle = designOptions.layoutAccentColor;
+  context.font = `600 ${mmToPx(2)}px Arial, sans-serif`;
+  context.fillText("KEEP", stubCenterX, middleY + mmToPx(8), stubWidth);
 }
 
 function drawLightFrameFooter(context: CanvasRenderingContext2D, clipX: number, clipY: number, clipWidth: number, clipHeight: number, x: number, y: number, width: number, height: number, radius: number, dpi: number) {
@@ -806,6 +912,10 @@ function onPageOrientationChange(event: Event) {
 }
 
 function onPhotoLayoutChange() {
+  if (designOptions.layoutPreset === "ticket") {
+    applyTicketPreset();
+    return;
+  }
   if (designOptions.layoutPreset !== "classic") {
     designOptions.lightFrameEnabled = false;
     designOptions.blurBackground = false;
@@ -813,7 +923,26 @@ function onPhotoLayoutChange() {
   }
 }
 
+function applyTicketPreset() {
+  templateId.value = "ticket-180x70";
+  designOptions.pageOrientation = "landscape";
+  designOptions.layoutPreset = "ticket";
+  designOptions.lightFrameEnabled = false;
+  designOptions.blurBackground = false;
+  designOptions.fitMode = "contain";
+  designOptions.frameMm = 6;
+  if (!designOptions.ticketSerial.trim()) designOptions.ticketSerial = "001";
+}
+
+function onPrintTemplateChange() {
+  if (templateId.value === "ticket-180x70") applyTicketPreset();
+}
+
 function applyRecommendedPhotoLayout() {
+  if (templateId.value === "ticket-180x70") {
+    applyTicketPreset();
+    return;
+  }
   const imageWidth = photoMetadata.value?.width || decodedImage?.naturalWidth || 0;
   const imageHeight = photoMetadata.value?.height || decodedImage?.naturalHeight || 0;
   if (imageWidth > 0 && imageHeight > 0 && selectedTemplate.value.widthMm !== selectedTemplate.value.heightMm) {
@@ -1441,11 +1570,11 @@ async function addToAssets() {
           </div>
         </div>
         <div class="canvas-stage">
-          <div class="print-canvas" :style="previewCanvasStyle">
-            <canvas ref="previewCanvas" class="photo-preview-canvas" :class="{ 'collage-selectable': isCollage }" role="img" :aria-label="isCollage ? '照片拼贴预览，点击单张照片进行选择' : '照片预览'" @click="selectCollagePhoto"></canvas>
+          <div class="print-canvas" :class="{ 'ticket-artboard': designOptions.layoutPreset === 'ticket' }" :style="previewCanvasStyle">
+            <canvas ref="previewCanvas" class="photo-preview-canvas" :class="{ 'collage-selectable': isCollage }" role="img" :aria-label="isCollage ? '照片拼贴预览，点击单张照片进行选择' : designOptions.layoutPreset === 'ticket' ? '票根形状照片预览' : '照片预览'" @click="selectCollagePhoto"></canvas>
           </div>
         </div>
-        <div class="preview-foot"><span>{{ isCollage ? `${collagePhotos.length} 张照片 · ${designOptions.collageLayout === 'grid' ? '规整网格' : '错落拼贴'} · 保留比例` : "原图完整保留比例，画布内自动留白" }}</span><span>{{ cameraInfo || fileName }}</span></div>
+        <div class="preview-foot"><span>{{ isCollage ? `${collagePhotos.length} 张照片 · ${designOptions.collageLayout === 'grid' ? '规整网格' : '错落拼贴'} · 保留比例` : designOptions.layoutPreset === 'ticket' ? "票根外轮廓 · 票面外透明 · 打印后沿外轮廓裁切" : "原图完整保留比例，画布内自动留白" }}</span><span>{{ cameraInfo || fileName }}</span></div>
       </div>
       <div id="export-actions" ref="exportActionsElement" class="export-row">
         <button class="button primary" :disabled="!imageData" @click="exportPng">导出 PNG · 300 DPI</button>
@@ -1459,21 +1588,23 @@ async function addToAssets() {
       <div ref="paperControlsElement" class="control-section">
         <div class="control-title"><h2>画面设置</h2><button class="text-button" @click="resetSettings">重置</button></div>
         <label class="field-label">作品名称<input v-model="title" type="text" maxlength="80" placeholder="给这件作品起个名字"></label>
-        <label class="field-label">纸张尺寸<select v-model="templateId"><option v-for="item in printTemplates" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-        <label class="field-label">纸张方向<select :value="designOptions.pageOrientation" @change="onPageOrientationChange"><option value="portrait">竖版</option><option value="landscape">横版</option></select></label>
-        <div class="range-label"><div class="range-heading"><span>相纸边框</span><b>{{ designOptions.frameMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.frameMm" type="range" min="0" max="24" step="0.5" aria-label="相纸边框"><input v-model.number="designOptions.frameMm" class="value-input" type="number" min="0" max="24" step="0.5" aria-label="相纸边框毫米"></div></div>
+        <label class="field-label">纸张尺寸<select v-model="templateId" @change="onPrintTemplateChange"><option v-for="item in printTemplates" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+        <label class="field-label">纸张方向<select :value="designOptions.pageOrientation" :disabled="designOptions.layoutPreset === 'ticket'" @change="onPageOrientationChange"><option value="portrait">竖版</option><option value="landscape">横版</option></select></label>
+        <div class="range-label"><div class="range-heading"><span>{{ designOptions.layoutPreset === 'ticket' ? "票面安全边距" : "相纸边框" }}</span><b>{{ designOptions.frameMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.frameMm" type="range" :min="designOptions.layoutPreset === 'ticket' ? 3 : 0" max="24" step="0.5" :aria-label="designOptions.layoutPreset === 'ticket' ? '票面安全边距' : '相纸边框'"><input v-model.number="designOptions.frameMm" class="value-input" type="number" :min="designOptions.layoutPreset === 'ticket' ? 3 : 0" max="24" step="0.5" :aria-label="designOptions.layoutPreset === 'ticket' ? '票面安全边距毫米' : '相纸边框毫米'"></div></div>
         <label class="field-label color-field">纸张底色<input v-model="designOptions.paperColor" type="color" aria-label="选择纸张底色"></label>
         <template v-if="!isCollage">
+          <div class="quick-ticket-card"><div><strong>票根快速制作</strong><span>切换为 180 × 70 mm 横版，自动排好照片、撕口和副券编号。</span></div><button type="button" class="button small" @click="applyTicketPreset">一键套用</button></div>
           <label class="field-label">成品版式<select v-model="designOptions.layoutPreset" @change="onPhotoLayoutChange"><option v-for="preset in photoLayoutPresets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select></label>
           <div class="layout-recommendation"><span>{{ selectedTemplate.name }} 推荐：{{ recommendedPhotoLayout.name }}</span><button class="text-button" @click="applyRecommendedPhotoLayout">套用</button></div>
           <template v-if="designOptions.layoutPreset !== 'classic'">
-            <label class="field-label">成品标题<input v-model="designOptions.layoutTitle" type="text" maxlength="48" placeholder="留空时使用作品名称"></label>
-            <label class="field-label">副标题<input v-model="designOptions.layoutSubtitle" type="text" maxlength="72" placeholder="可不填写"></label>
-            <label class="field-label">作者 / 落款<input v-model="designOptions.layoutAuthor" type="text" maxlength="40" placeholder="例如：摄影：小林"></label>
+            <label class="field-label">{{ designOptions.layoutPreset === 'ticket' ? "活动 / 票面标题" : "成品标题" }}<input v-model="designOptions.layoutTitle" type="text" maxlength="48" placeholder="留空时使用作品名称"></label>
+            <label class="field-label">{{ designOptions.layoutPreset === 'ticket' ? "日期 / 场次 / 地点" : "副标题" }}<input v-model="designOptions.layoutSubtitle" type="text" maxlength="72" placeholder="可不填写"></label>
+            <label class="field-label">{{ designOptions.layoutPreset === 'ticket' ? "主办方 / 落款" : "作者 / 落款" }}<input v-model="designOptions.layoutAuthor" type="text" maxlength="40" :placeholder="designOptions.layoutPreset === 'ticket' ? '例如：主办方名称' : '例如：摄影：小林'"></label>
+            <label v-if="designOptions.layoutPreset === 'ticket'" class="field-label">副券编号<input v-model="designOptions.ticketSerial" type="text" maxlength="16" placeholder="例如：A-001"></label>
             <div class="range-label"><div class="range-heading"><span>标题字号</span><b>{{ designOptions.layoutTitleSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.layoutTitleSizeMm" type="range" min="3" max="16" step="0.5" aria-label="版式标题字号"><input v-model.number="designOptions.layoutTitleSizeMm" class="value-input" type="number" min="3" max="16" step="0.5" aria-label="版式标题字号毫米"></div></div>
             <div class="range-label"><div class="range-heading"><span>副标题字号</span><b>{{ designOptions.layoutSubtitleSizeMm }} mm</b></div><div class="range-inputs"><input v-model.number="designOptions.layoutSubtitleSizeMm" type="range" min="1" max="8" step="0.5" aria-label="版式副标题字号"><input v-model.number="designOptions.layoutSubtitleSizeMm" class="value-input" type="number" min="1" max="8" step="0.5" aria-label="版式副标题字号毫米"></div></div>
             <label class="field-label color-field">强调色<input v-model="designOptions.layoutAccentColor" type="color" aria-label="选择版式强调色"></label>
-            <p class="adjustment-note">版式会按 {{ selectedTemplate.name }} 的实际纸张比例重新排布。照片不拉伸；标题与底栏也会写入 PNG / PDF。</p>
+            <p class="adjustment-note">{{ designOptions.layoutPreset === 'ticket' ? "PNG 票面外为透明；PDF 页面仍为矩形，请打印后沿票根外轮廓裁切。照片不拉伸，文字和撕口虚线会一起导出。" : `版式会按 ${selectedTemplate.name} 的实际纸张比例重新排布。照片不拉伸；标题与底栏也会写入 PNG / PDF。` }}</p>
           </template>
         </template>
         <p v-else class="adjustment-note">当前为多照片拼贴；请在下方选择规整网格或错落拼贴并设置列数、间距。</p>
@@ -1557,7 +1688,7 @@ async function addToAssets() {
           <p class="adjustment-note">前景照片保持清晰，放大模糊图填满底色；底栏自动读取原片里已有的相机、镜头、参数和时间。缺失的 EXIF 不会补造。效果会用于 PNG 和打印 PDF。</p>
         </div>
       </div>
-      <div v-if="!isCollage && !designOptions.lightFrameEnabled" class="control-section">
+      <div v-if="!isCollage && !designOptions.lightFrameEnabled && designOptions.layoutPreset !== 'ticket'" class="control-section">
         <div class="control-title"><h2>照片放大虚化背景</h2><span class="control-hint">单张照片</span></div>
         <label class="toggle-field"><input v-model="designOptions.blurBackground" type="checkbox" :disabled="!imageData"><span>使用照片放大模糊作为底图</span></label>
         <template v-if="designOptions.blurBackground">
@@ -1609,6 +1740,8 @@ async function addToAssets() {
 .field-label{display:grid;gap:7px;font-size:9px;color:#777970;margin-top:12px}.field-label input,.field-label select{width:100%;height:35px;border:1px solid #e5e5df;border-radius:6px;padding:0 9px;color:#4a4b44;background:white;font-size:10px;outline:none}.field-label input:focus,.field-label select:focus{border-color:#a8aa9e}
 .field-label.color-field input[type=color]{width:100%;height:32px;padding:3px;cursor:pointer}.fit-options{display:grid;grid-template-columns:1fr 1fr;gap:6px}.fit-options .preset-chip{height:34px}.rotate-button{margin-top:13px}.toggle-field{display:flex;align-items:center;gap:8px;color:#6f7168;font-size:10px}.toggle-field input{accent-color:#56594e}
 .layout-recommendation{display:flex;justify-content:space-between;align-items:center;margin-top:9px;padding:9px 10px;border:1px solid #e8e8e2;border-radius:6px;background:#fafaf8;color:#777970;font-size:9px}.layout-recommendation .text-button{color:#56594e;font-weight:600}
+.quick-ticket-card{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:12px 0;padding:10px;border:1px solid #e7e1d6;border-radius:7px;background:#f8f6f1}.quick-ticket-card>div{display:grid;gap:4px;min-width:0}.quick-ticket-card strong{font-size:10px;color:#565247}.quick-ticket-card span{font-size:9px;color:#8b887f;line-height:1.5}.quick-ticket-card .button{flex:none}
+.print-canvas.ticket-artboard{background:transparent}
 .collage-photo-list{display:grid;gap:6px;margin-top:14px}.collage-photo-row{display:grid;grid-template-columns:18px minmax(0,1fr) 20px 20px 34px;align-items:center;gap:5px;border-bottom:1px solid #f0f0ec;padding:5px 0}.collage-photo-row.selected{background:#f1f2ed;border-radius:5px}.collage-photo-index{color:#9a9b93;font-size:9px;text-align:center}.collage-photo-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#65675e;font-size:9px;border:0;background:transparent;text-align:left;padding:3px 4px;cursor:pointer}.collage-photo-row.selected .collage-photo-name{color:#30312c;font-weight:600}.collage-photo-row .text-button{padding:3px 0}.collage-photo-row .text-button:disabled{opacity:.35}.remove-photo-button{color:#9a6a62!important}.collage-photo-editor{margin-top:16px;padding-top:13px;border-top:1px solid #e8e9e2}.collage-photo-editor h3{font-size:11px;margin:0;font-weight:600}.selected-photo-label{margin:0 0 11px;color:#777970;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.photo-adjustment-list{margin-top:11px;padding-top:10px;border-top:1px solid #efefeb}.light-frame-options{display:grid;gap:8px;margin-top:12px}
 .range-label{display:grid;gap:8px;margin-top:14px}.range-heading{display:flex;justify-content:space-between;align-items:baseline;color:#76786f;font-size:9px}.range-heading label{cursor:pointer}.range-heading b{color:#565850;font-weight:500}.range-inputs{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center}.range-inputs input[type=range]{width:100%;accent-color:#56594e;height:13px}.range-inputs .value-input{width:72px;height:28px;border:1px solid #e5e5df;border-radius:5px;padding:0 5px;color:#4a4b44;background:white;font-size:10px;text-align:right}.range-inputs .value-input:focus{border-color:#a8aa9e;outline:none}
 .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.preset-chip{height:31px;border:1px solid #e8e8e2;background:white;border-radius:6px;font-size:9px;color:#777970}.preset-chip.selected{border-color:#777a6e;background:#f2f2ee;color:#373930}

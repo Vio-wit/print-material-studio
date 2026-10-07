@@ -5,5 +5,6 @@ export const printTemplates: PrintTemplate[] = [
   { id: "photo-5x7", name: "5 × 7 英寸相纸", widthMm: 127, heightMm: 177.8, note: "适合相框与贺卡", category: "相纸" },
   { id: "a5", name: "A5 竖版", widthMm: 148, heightMm: 210, note: "可做小海报或内页", category: "纸张" },
   { id: "square-10", name: "10 × 10 cm 方形卡", widthMm: 100, heightMm: 100, note: "方形照片卡", category: "卡片" },
-  { id: "postcard", name: "明信片 10 × 15 cm", widthMm: 100, heightMm: 150, note: "留白边框，不强制裁切", category: "卡片" }
+  { id: "postcard", name: "明信片 10 × 15 cm", widthMm: 100, heightMm: 150, note: "留白边框，不强制裁切", category: "卡片" },
+  { id: "ticket-180x70", name: "票根 180 × 70 mm", widthMm: 180, heightMm: 70, note: "横向票券，可自定义标题、说明和编号", category: "票券" }
 ];
